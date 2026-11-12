@@ -1,0 +1,35 @@
+# env Python
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest cache
+.pytest_cache/
+
+# MyPy / Ruff cache
+.mypy_cache/
+.ruff_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg/
+
+# Coverage
+.coverage
+htmlcov/
+
+# VS Code 
+# .vscode/
+
+# docs
+docs/
+*.md
