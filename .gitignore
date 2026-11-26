@@ -33,6 +33,7 @@ htmlcov/
 
 # Large reference source and local Markdown notes/plans (kept untracked on disk).
 *.md
+!README.md
 docs/IB.pdf
 
 # Downloaded SEC payload cache

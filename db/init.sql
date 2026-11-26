@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS cases (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     owner_id UUID REFERENCES users(id) ON DELETE SET NULL,
     company_name VARCHAR(255) NOT NULL,
-    status VARCHAR(50) DEFAULT 'draft',
+    status VARCHAR(50) DEFAULT 'active',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -123,6 +123,11 @@ CREATE TABLE IF NOT EXISTS valuation_results (
     outlier_flags JSONB DEFAULT '{}'::jsonb,
     excluded_peers JSONB DEFAULT '{}'::jsonb,
     limitations TEXT[] DEFAULT ARRAY[]::TEXT[],
+    explanation_md TEXT,
+    narrative_md TEXT,
+    audit_verdict VARCHAR(20),
+    audit_findings JSONB DEFAULT '[]'::jsonb,
+    prompt_version VARCHAR(50),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 

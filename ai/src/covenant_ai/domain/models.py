@@ -14,7 +14,7 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from covenant_ai.domain.business_profile import BusinessProfile
 
@@ -24,6 +24,116 @@ class SourceType(StrEnum):
     USER_PROVIDED = "user_provided"
     SEC_FILING = "sec_filing"
     MARKET_DATA = "market_data"
+
+
+class EbitdaPeriod(StrEnum):
+    """Supported financial period bases aligned across target and SEC/DB peers."""
+    FY = "FY"
+    LTM = "LTM"
+
+
+class RevenueModel(StrEnum):
+    """Normalized revenue model archetypes for comparable positioning."""
+    RECURRING_SUBSCRIPTION = "recurring_subscription"
+    ONE_OFF_SALES = "one_off_sales"
+    PROJECT_BASED = "project_based"
+    TRANSACTIONAL_USAGE = "transactional_usage"
+    HYBRID_MIXED = "hybrid_mixed"
+    UNKNOWN = "unknown"
+
+
+class GeographyRegion(StrEnum):
+    """Mutually exclusive primary operating geography tags (avoids Jaccard subset overlap)."""
+    US = "us"
+    CANADA = "canada"
+    MEXICO_LATAM = "mexico_latam"
+    EUROPE = "europe"
+    APAC = "apac"
+    OTHER_GLOBAL = "other_global"
+
+
+class InferenceSource(StrEnum):
+    """Origin and verification state of an extracted or inferred profile field."""
+    USER_EXPLICIT = "user_explicit"
+    LLM_INFERRED = "llm_inferred"
+    USER_CONFIRMED = "user_confirmed"
+    DEFAULT_FALLBACK = "default_fallback"
+
+
+class AuditVerdict(StrEnum):
+    """Outcome of the post-explain self-audit quality gate."""
+    PASS = "pass"
+    WARN = "warn"
+    FAIL = "fail"
+
+
+class CaseStatus(StrEnum):
+    """Lifecycle states for a valuation case record."""
+    DRAFT = "draft"
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class ExplainMode(StrEnum):
+    """Narrative rendering mode for the final valuation report."""
+    LLM_HYBRID = "llm_hybrid"
+    DETERMINISTIC = "deterministic"
+
+
+def infer_revenue_model_enum(raw: str | None) -> RevenueModel | None:
+    """Map exact enum slug or common human phrasing onto RevenueModel."""
+    if not raw or not str(raw).strip():
+        return None
+    norm = str(raw).strip().lower()
+    try:
+        return RevenueModel(norm)
+    except ValueError:
+        pass
+    if any(k in norm for k in ("recurring", "subscription", "saas", "arr", "retainer")):
+        return RevenueModel.RECURRING_SUBSCRIPTION
+    if any(k in norm for k in ("hybrid", "mixed", "oem + aftermarket", "aftermarket")):
+        return RevenueModel.HYBRID_MIXED
+    if any(k in norm for k in ("one-off", "one time", "one-time", "upfront", "product sale", "retail")):
+        return RevenueModel.ONE_OFF_SALES
+    if any(k in norm for k in ("project", "contract", "milestone", "consulting")):
+        return RevenueModel.PROJECT_BASED
+    if any(k in norm for k in ("per-transaction", "transaction fee", "transactional", "usage", "commission", "brokerage")):
+        return RevenueModel.TRANSACTIONAL_USAGE
+    return RevenueModel.UNKNOWN
+
+
+def infer_geography_region(raw: str | None) -> GeographyRegion | None:
+    """Map free-text geography to a mutually exclusive GeographyRegion bucket."""
+    if not raw or not str(raw).strip():
+        return None
+    norm = str(raw).strip().lower()
+    try:
+        return GeographyRegion(norm)
+    except ValueError:
+        pass
+    if norm in {"us", "u.s.", "u.s.a.", "usa", "united states", "united states of america"} or (
+        "united states" in norm and "canada" not in norm
+    ):
+        return GeographyRegion.US
+    if "canada" in norm and "us" not in norm and "united states" not in norm:
+        return GeographyRegion.CANADA
+    if any(k in norm for k in ("mexico", "latam", "latin america", "brazil")):
+        return GeographyRegion.MEXICO_LATAM
+    if any(k in norm for k in ("europe", "uk", "united kingdom", "germany", "france", "eu")):
+        return GeographyRegion.EUROPE
+    if any(k in norm for k in ("apac", "asia", "vietnam", "singapore", "japan", "australia")):
+        return GeographyRegion.APAC
+    return GeographyRegion.OTHER_GLOBAL
+
+
+class FieldInference(BaseModel):
+    """Provenance record for an extracted or inferred target profile attribute."""
+    field_name: str
+    value: str
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    evidence_quote: str = ""
+    quote_verified: bool = True
+    source: InferenceSource = InferenceSource.USER_EXPLICIT
 
 
 class FinancialDatapoint(BaseModel):
@@ -57,6 +167,10 @@ class AdjustmentLineItem(BaseModel):
     description: str
     amount: Decimal
     source_note: str = ""
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    evidence_quote: str | None = None
+    quote_verified: bool | None = None
+    inference_source: InferenceSource = InferenceSource.USER_EXPLICIT
 
 
 class EbitdaAdjustmentSchedule(BaseModel):
@@ -90,19 +204,32 @@ class EbitdaAdjustmentSchedule(BaseModel):
         charges = Decimal(0)
         income = Decimal(0)
 
+        normalized_items: list[AdjustmentLineItem] = []
         for item in items:
             if item.category == AdjustmentCategory.OWNER_COMPENSATION:
                 owner_comp += item.amount
+                normalized_items.append(item)
             elif item.category == AdjustmentCategory.DISCRETIONARY_EXPENSES:
                 discretionary += item.amount
+                normalized_items.append(item)
             elif item.category == AdjustmentCategory.RELATED_PARTY_RENT:
                 rent += item.amount
+                normalized_items.append(item)
             elif item.category == AdjustmentCategory.NON_RECURRING_CHARGES:
                 charges += item.amount
+                normalized_items.append(item)
             elif item.category == AdjustmentCategory.NON_RECURRING_INCOME:
-                income += item.amount
+                # Non-recurring income always reduces normalized EBITDA; keep
+                # schedule.non_recurring_income positive (subtracted in total_adjustments)
+                # and item.amount negative (signed EBITDA impact in ledger).
+                mag = abs(item.amount)
+                income += mag
+                normalized_items.append(
+                    item if item.amount <= 0 else item.model_copy(update={"amount": -mag})
+                )
             else:
                 charges += item.amount
+                normalized_items.append(item)
 
         return cls(
             reported_ebitda=reported_ebitda,
@@ -111,7 +238,7 @@ class EbitdaAdjustmentSchedule(BaseModel):
             rent_adjustment=rent,
             non_recurring_charges=charges,
             non_recurring_income=income,
-            line_items=items,
+            line_items=normalized_items,
         )
 
     @property
@@ -159,6 +286,13 @@ class EbitdaAdjustmentSchedule(BaseModel):
         ]
         if self.line_items:
             for item in self.line_items:
+                parts = [p for p in (item.description, item.source_note) if p]
+                if item.evidence_quote:
+                    q_tag = "quote" if item.quote_verified is not False else "UNVERIFIED quote"
+                    parts.append(f'{q_tag}="{item.evidence_quote}"')
+                if item.confidence is not None:
+                    parts.append(f"conf={item.confidence:.2f}")
+                ref = " | ".join(parts) if parts else f"Adjustment: {item.category.value}"
                 pts.append(
                     FinancialDatapoint(
                         metric=f"adj_{item.category.value}",
@@ -166,7 +300,7 @@ class EbitdaAdjustmentSchedule(BaseModel):
                         period=period,
                         period_end=period_end,
                         source_type=SourceType.USER_PROVIDED,
-                        source_ref=f"{item.description} ({item.source_note})".strip(),
+                        source_ref=ref,
                         retrieved_at=now,
                         peer_ticker=None,
                     )
@@ -217,18 +351,40 @@ class CompanyProfile(BaseModel):
     # produce an EV/Sales cross-check.
     revenue: Decimal | None = Field(default=None, gt=0)
     ebitda: Decimal  # Normalized EBITDA used for valuation
-    ebitda_period: str = "FY"
+    ebitda_period: str = EbitdaPeriod.FY.value
+    target_fiscal_year: int | None = Field(default=None, ge=1900, le=2100)
+    period_end_date: date | None = None
     reported_ebitda: Decimal | None = None
     total_debt: Decimal = Decimal(0)
     cash: Decimal = Decimal(0)
     adjustment_schedule: EbitdaAdjustmentSchedule | None = None
     business_description: str | None = None
+    geography_region: GeographyRegion | None = None
     revenue_model: str | None = None
+    revenue_model_type: RevenueModel | None = None
+    revenue_model_note: str | None = None
     customer_concentration_pct: Decimal | None = Field(default=None, ge=0, le=100)
     revenue_growth_pct: Decimal | None = None
     capex: Decimal | None = Field(default=None, ge=0)
     credit_rating: str | None = None
     business_profile: BusinessProfile | None = None
+    inference_provenance: dict[str, FieldInference] = Field(default_factory=dict)
+    inconsistencies: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_fiscal_year_from_period(cls, data: object) -> object:
+        """Preserve fiscal year when period is passed as 'FY2025' before normalization."""
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("ebitda_period")
+        if isinstance(raw, str):
+            m = re.fullmatch(r"FY[\s-]?(\d{4})", raw.strip().upper())
+            if m and data.get("target_fiscal_year") is None:
+                updated = dict(data)
+                updated["target_fiscal_year"] = int(m.group(1))
+                return updated
+        return data
 
     @field_validator("ebitda_period", mode="before")
     @classmethod

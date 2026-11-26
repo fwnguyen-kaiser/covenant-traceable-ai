@@ -20,8 +20,10 @@ from langgraph.types import Command
 
 from covenant_ai.domain.intake import create_company_profile_from_intake
 from covenant_ai.domain.intake_questions import Stage, questions
+from covenant_ai.domain.models import ExplainMode
 from covenant_ai.graph.checkpointer import open_postgres_checkpointer
 from covenant_ai.graph.workflow import create_valuation_graph
+from covenant_ai.llm.client import LLMClient, build_default_llm_client
 from covenant_ai.providers.db_schema import normalize_db_url
 from covenant_ai.providers.postgres import PostgresMarketDataProvider
 from covenant_ai.providers.postgres_repo import PostgresCaseRepository
@@ -54,6 +56,22 @@ def collect_interactive_intake() -> dict[str, Any]:
 
 def _prompt_hitl_decision(payload: dict[str, Any], auto_approve: bool) -> Any:
     action = payload.get("action")
+    if action == "intake_clarify":
+        if auto_approve:
+            raise PauseRequested()
+        print("\n--- Intake Clarification Needed ---")
+        if payload.get("error"):
+            print(f"Validation error: {payload['error']}")
+        draft = payload.get("extracted_draft") or {}
+        if draft:
+            print(f"Extracted so far: {json.dumps(draft)}")
+        for q in payload.get("questions") or []:
+            print(f"- {q}")
+        resp = input("Enter clarification details (or type 'pause'): ").strip()
+        if resp.lower() == "pause":
+            raise PauseRequested()
+        return resp
+
     if action == "confirm_industry":
         proposed = payload.get("proposed")
         if auto_approve:
@@ -62,6 +80,30 @@ def _prompt_hitl_decision(payload: dict[str, Any], auto_approve: bool) -> Any:
         if payload.get("error"):
             print(f"Validation error: {payload['error']}")
         print(f"Proposed industry: {proposed}")
+        if payload.get("sub_industry") or payload.get("customer_type"):
+            print(
+                f"Sub-industry / Customer type: {payload.get('sub_industry') or 'none'} / "
+                f"{payload.get('customer_type') or 'unspecified'}"
+            )
+        eb_sum = payload.get("ebitda_summary")
+        if eb_sum:
+            yr = f" ({eb_sum['target_fiscal_year']})" if eb_sum.get("target_fiscal_year") else ""
+            print(
+                f"EBITDA Summary ({eb_sum.get('ebitda_period')}{yr}): "
+                f"Normalized=${eb_sum.get('normalized_ebitda')} "
+                f"(Reported={eb_sum.get('reported_ebitda')}, Net Adj={eb_sum.get('total_adjustments')})"
+            )
+        prov = payload.get("provenance") or {}
+        if prov:
+            print("Inferred field provenance:")
+            for k, v in prov.items():
+                q_tag = "verified" if v.get("quote_verified") else "UNVERIFIED"
+                print(
+                    f"  - {k}={v.get('value')} (conf={v.get('confidence')}, {q_tag}, "
+                    f"quote={v.get('evidence_quote')!r})"
+                )
+        for inc in payload.get("inconsistencies") or []:
+            print(f"  [Inconsistency Note] {inc}")
         print(f"Allowed options : {', '.join(payload.get('allowed', []))}")
         resp = input("Press Enter to confirm, type an industry slug, or type 'pause': ").strip()
         if resp.lower() == "pause":
@@ -134,9 +176,19 @@ def _run_hitl_step(
     return next_state
 
 
-def run_cli(argv: list[str] | None = None) -> int:
+def run_cli(
+    argv: list[str] | None = None,
+    *,
+    llm_client: LLMClient | None = None,
+) -> int:
     parser = argparse.ArgumentParser(description="Covenant AI Valuation CLI Runner")
     parser.add_argument("--input", type=Path, help="Path to JSON file containing intake answers")
+    parser.add_argument("--prompt", help="Natural-language company profile prompt (English USD)")
+    parser.add_argument(
+        "--explain-mode",
+        choices=[m.value for m in ExplainMode],
+        help="Override report narrative mode (llm_hybrid or deterministic)",
+    )
     parser.add_argument("--resume", metavar="THREAD_ID", help="Resume an interrupted run from PostgreSQL")
     parser.add_argument("--thread-id", help="Explicit thread_id for a new run")
     parser.add_argument("--db-url", help="PostgreSQL connection URI override")
@@ -149,13 +201,46 @@ def run_cli(argv: list[str] | None = None) -> int:
     db_url = normalize_db_url(args.db_url)
     repo = PostgresCaseRepository(db_url=db_url)
     provider = PostgresMarketDataProvider(db_url=db_url, allow_on_demand_yahoo=True)
+    active_llm = llm_client if llm_client is not None else build_default_llm_client()
+    default_mode = args.explain_mode or (
+        ExplainMode.LLM_HYBRID.value if active_llm is not None else ExplainMode.DETERMINISTIC.value
+    )
 
     run_id = None
     case_id = None
     already_completed = False
+    synced_profile_sig: tuple[Any, ...] | None = None
+
+    def _profile_sig(prof: Any) -> tuple[Any, ...] | None:
+        if prof is None:
+            return None
+        sub = prof.business_profile.sub_industry if getattr(prof, "business_profile", None) else None
+        return (prof.industry, str(prof.ebitda), sub)
+
+    def _ensure_or_sync_case_and_run(st: dict[str, Any], tid: str) -> None:
+        nonlocal case_id, run_id, synced_profile_sig
+        prof = st.get("company_profile")
+        if prof is None:
+            return
+        sig = _profile_sig(prof)
+        if run_id is None:
+            case_id, profile_id = repo.create_case_and_profile(prof, st.get("intake_answers"))
+            run_id = repo.start_analysis_run(case_id, profile_id, thread_id=tid)
+            synced_profile_sig = sig
+        elif synced_profile_sig is not None and sig != synced_profile_sig and case_id is not None:
+            case_id, new_profile_id = repo.create_case_and_profile(
+                prof, st.get("intake_answers"), case_id=case_id
+            )
+            repo.update_run_profile(run_id, new_profile_id)
+            synced_profile_sig = sig
 
     with open_postgres_checkpointer(db_url) as checkpointer:
-        app = create_valuation_graph(provider, checkpointer=checkpointer)
+        app = create_valuation_graph(
+            provider,
+            checkpointer=checkpointer,
+            llm_client=active_llm,
+            default_explain_mode=default_mode,
+        )
 
         if args.resume:
             thread_id = args.resume
@@ -169,6 +254,8 @@ def run_cli(argv: list[str] | None = None) -> int:
                 print(f"No checkpoint found for thread_id={thread_id!r}", file=sys.stderr)
                 return 1
             state = dict(snap.values)
+            if run_id is not None:
+                synced_profile_sig = _profile_sig(state.get("company_profile"))
             pending_interrupts = [
                 intr.value
                 for task in (snap.tasks or ())
@@ -187,6 +274,26 @@ def run_cli(argv: list[str] | None = None) -> int:
                 )
                 if state is None:
                     return 0
+                _ensure_or_sync_case_and_run(state, thread_id)
+        elif args.prompt:
+            if active_llm is None:
+                print(
+                    "Natural-language --prompt mode requires GEMINI_API_KEY or an injected LLMClient.",
+                    file=sys.stderr,
+                )
+                return 1
+            thread_id = args.thread_id or f"run-{uuid4().hex[:12]}"
+            config = {"configurable": {"thread_id": thread_id}}
+            init_state: dict[str, Any] = {"raw_input": args.prompt}
+            if args.explain_mode:
+                init_state["explain_mode"] = args.explain_mode
+            state = app.invoke(init_state, config=config)
+            _ensure_or_sync_case_and_run(state, thread_id)
+            if run_id is not None:
+                print(f"Started case={case_id} run={run_id} thread_id={thread_id}")
+            if args.pause_after_intake and "__interrupt__" in state:
+                print(f"Paused cleanly after intake. Resume with: --resume {thread_id}")
+                return 0
         else:
             answers = (
                 json.loads(args.input.read_text(encoding="utf-8"))
@@ -195,11 +302,15 @@ def run_cli(argv: list[str] | None = None) -> int:
             )
             profile, _ = create_company_profile_from_intake(answers)
             case_id, profile_id = repo.create_case_and_profile(profile, answers)
+            synced_profile_sig = _profile_sig(profile)
             thread_id = args.thread_id or f"run-{uuid4().hex[:12]}"
             run_id = repo.start_analysis_run(case_id, profile_id, thread_id=thread_id)
             config = {"configurable": {"thread_id": thread_id}}
             print(f"Started case={case_id} run={run_id} thread_id={thread_id}")
-            state = app.invoke({"intake_answers": answers}, config=config)
+            init_state = {"intake_answers": answers}
+            if args.explain_mode:
+                init_state["explain_mode"] = args.explain_mode
+            state = app.invoke(init_state, config=config)
             if args.pause_after_intake and "__interrupt__" in state:
                 print(f"Paused cleanly after intake. Resume with: --resume {thread_id}")
                 return 0
@@ -218,6 +329,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             )
             if state is None:
                 return 0
+            _ensure_or_sync_case_and_run(state, thread_id)
 
     if run_id is not None and not already_completed:
         repo.finish_analysis_run(run_id, state)
@@ -236,6 +348,10 @@ def run_cli(argv: list[str] | None = None) -> int:
                     "valuation": state.get("valuation"),
                     "peer_screening_results": state.get("peer_screening_results"),
                     "failed_peers": state.get("failed_peers"),
+                    "audit_verdict": state.get("audit_verdict"),
+                    "audit_findings": state.get("audit_findings"),
+                    "audit_fallback_used": state.get("audit_fallback_used"),
+                    "inconsistencies": state.get("inconsistencies"),
                 },
                 indent=2,
                 default=str,

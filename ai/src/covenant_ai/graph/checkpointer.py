@@ -13,6 +13,14 @@ from covenant_ai.providers.db_schema import normalize_db_url
 
 COVENANT_MSGPACK_ALLOWLIST: tuple[tuple[str, str], ...] = (
     ("covenant_ai.domain.models", "SourceType"),
+    ("covenant_ai.domain.models", "EbitdaPeriod"),
+    ("covenant_ai.domain.models", "RevenueModel"),
+    ("covenant_ai.domain.models", "GeographyRegion"),
+    ("covenant_ai.domain.models", "InferenceSource"),
+    ("covenant_ai.domain.models", "AuditVerdict"),
+    ("covenant_ai.domain.models", "CaseStatus"),
+    ("covenant_ai.domain.models", "ExplainMode"),
+    ("covenant_ai.domain.models", "FieldInference"),
     ("covenant_ai.domain.models", "FinancialDatapoint"),
     ("covenant_ai.domain.models", "AdjustmentCategory"),
     ("covenant_ai.domain.models", "AdjustmentLineItem"),

@@ -59,9 +59,20 @@ class PostgresCaseRepository:
         """Insert/update a case row and append a new versioned company_profiles row."""
         extra_payload = {
             "ebitda_period": profile.ebitda_period,
+            "target_fiscal_year": profile.target_fiscal_year,
+            "period_end_date": (
+                profile.period_end_date.isoformat() if profile.period_end_date is not None else None
+            ),
             "reported_ebitda": str(profile.reported_ebitda) if profile.reported_ebitda is not None else None,
             "business_description": profile.business_description,
+            "geography_region": (
+                profile.geography_region.value if profile.geography_region is not None else None
+            ),
             "revenue_model": profile.revenue_model,
+            "revenue_model_type": (
+                profile.revenue_model_type.value if profile.revenue_model_type is not None else None
+            ),
+            "revenue_model_note": profile.revenue_model_note,
             "customer_concentration_pct": (
                 str(profile.customer_concentration_pct)
                 if profile.customer_concentration_pct is not None
@@ -82,6 +93,12 @@ class PostgresCaseRepository:
                 if profile.business_profile is not None
                 else None
             ),
+            "inference_provenance": (
+                {k: v.model_dump(mode="json") for k, v in profile.inference_provenance.items()}
+                if profile.inference_provenance
+                else {}
+            ),
+            "inconsistencies": list(profile.inconsistencies),
             "intake_answers": intake_answers or {},
         }
 
@@ -208,6 +225,16 @@ class PostgresCaseRepository:
         if not row:
             return None
         return _coerce_uuid(row[0]), _coerce_uuid(row[1]), str(row[2])
+
+    def update_run_profile(self, run_id: UUID, profile_id: UUID) -> None:
+        """Update analysis_runs.profile_id when a HITL edit creates a new profile version."""
+        with psycopg.connect(self.db_url, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE analysis_runs SET profile_id = %s WHERE id = %s;",
+                    (str(profile_id), str(run_id)),
+                )
+            conn.commit()
 
     def append_audit_log(
         self,
@@ -376,10 +403,12 @@ class PostgresCaseRepository:
                         INSERT INTO valuation_results (
                             run_id, ev_low, ev_mid, ev_high, equity_low, equity_mid, equity_high,
                             multiples_used, sales_multiples_used, peer_stats, outlier_flags,
-                            excluded_peers, limitations
+                            excluded_peers, limitations,
+                            explanation_md, narrative_md, audit_verdict, audit_findings, prompt_version
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s, %s,
-                            %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s
+                            %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s,
+                            %s, %s, %s, %s::jsonb, %s
                         )
                         ON CONFLICT (run_id) DO UPDATE SET
                             ev_low = EXCLUDED.ev_low,
@@ -393,7 +422,12 @@ class PostgresCaseRepository:
                             peer_stats = EXCLUDED.peer_stats,
                             outlier_flags = EXCLUDED.outlier_flags,
                             excluded_peers = EXCLUDED.excluded_peers,
-                            limitations = EXCLUDED.limitations;
+                            limitations = EXCLUDED.limitations,
+                            explanation_md = EXCLUDED.explanation_md,
+                            narrative_md = EXCLUDED.narrative_md,
+                            audit_verdict = EXCLUDED.audit_verdict,
+                            audit_findings = EXCLUDED.audit_findings,
+                            prompt_version = EXCLUDED.prompt_version;
                         """,
                         (
                             str(run_id),
@@ -409,6 +443,11 @@ class PostgresCaseRepository:
                             _to_jsonb(val.get("outlier_flags") or {}),
                             _to_jsonb(val.get("excluded_peers") or {}),
                             list(val.get("limitations") or []),
+                            state.get("explanation"),
+                            state.get("narrative_md"),
+                            state.get("audit_verdict"),
+                            _to_jsonb(state.get("audit_findings") or []),
+                            state.get("prompt_version"),
                         ),
                     )
 
@@ -426,6 +465,8 @@ class PostgresCaseRepository:
                             "selected_peers": sorted(selected_set),
                             "failed_peers": failed_peers,
                             "datapoint_count": len(ledger),
+                            "audit_verdict": state.get("audit_verdict"),
+                            "inconsistencies": list(state.get("inconsistencies") or []),
                         }),
                     ),
                 )

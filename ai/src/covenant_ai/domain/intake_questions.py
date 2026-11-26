@@ -33,7 +33,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
-from covenant_ai.domain.industry import Industry
+from covenant_ai.domain.industry import CustomerType, Industry
+from covenant_ai.domain.models import EbitdaPeriod, RevenueModel
 
 
 class Stage(StrEnum):
@@ -106,11 +107,27 @@ QUESTION_BANK: tuple[Question, ...] = (
     Question(
         id="revenue_model",
         group="business",
-        prompt="How do you earn revenue: recurring subscriptions, one-off sales, "
-        "project fees, or per-transaction fees?",
+        prompt="What is the primary revenue model (recurring_subscription, one_off_sales, "
+        "project_based, transactional_usage, hybrid_mixed, or unknown)?",
         why="Recurring revenue is usually valued differently from one-off revenue.",
-        answer_type=AnswerType.TEXT,
+        answer_type=AnswerType.CHOICE,
         maps_to="revenue_model",
+        choices=tuple(m.value for m in RevenueModel),
+    ),
+    Question(
+        id="customer_type",
+        group="business",
+        prompt="Who are your primary customers (b2b, b2c, gov, or mixed)?",
+        why="Customer type improves comparable peer screening accuracy.",
+        answer_type=AnswerType.CHOICE,
+        choices=tuple(c.value for c in CustomerType),
+    ),
+    Question(
+        id="sub_industry",
+        group="business",
+        prompt="Which sub-industry niche best describes your business (optional)?",
+        why="Narrows comparable peer ranking within broad industry groups.",
+        answer_type=AnswerType.TEXT,
     ),
     Question(
         id="customer_concentration",
@@ -145,10 +162,11 @@ QUESTION_BANK: tuple[Question, ...] = (
         group="financials",
         prompt="Which trailing financial basis do these figures cover (FY or LTM)?",
         why="All peer comparables are matched on the exact same period basis (annual FY or rolling LTM).",
-        answer_type=AnswerType.TEXT,
+        answer_type=AnswerType.CHOICE,
         required=True,
         maps_to="ebitda_period",
-        default="FY",
+        choices=tuple(p.value for p in EbitdaPeriod),
+        default=EbitdaPeriod.FY.value,
     ),
     Question(
         id="revenue_growth",

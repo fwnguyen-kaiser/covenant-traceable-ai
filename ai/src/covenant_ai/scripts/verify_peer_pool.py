@@ -17,13 +17,28 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
 from datetime import date, datetime
 from pathlib import Path
 
-USER_AGENT = "Friedrich fwnguyen1112@gmail.com"
+
+def _resolve_user_agent() -> str:
+    if os.getenv("SEC_USER_AGENT"):
+        return os.environ["SEC_USER_AGENT"].strip()
+    for root in (Path(__file__).resolve().parents[4], Path.cwd(), Path.cwd().parent):
+        env_path = root / ".env"
+        if env_path.is_file():
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                s = line.strip()
+                if s and not s.startswith("#") and s.startswith("SEC_USER_AGENT="):
+                    return s.split("=", 1)[1].strip().strip('"').strip("'")
+    return "CovenantResearch contact@example.com"
+
+
+USER_AGENT = _resolve_user_agent()
 MAX_AGE_DAYS = 450
 MIN_VERIFIED_PEERS = 8
 SLEEP = 0.15  # ~6-7 req/s, safely under the 10 req/s limit

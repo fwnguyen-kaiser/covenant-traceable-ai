@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 
@@ -10,7 +11,12 @@ from covenant_ai.domain.models import (
     AdjustmentLineItem,
     CompanyProfile,
     EbitdaAdjustmentSchedule,
+    FieldInference,
+    GeographyRegion,
+    InferenceSource,
+    RevenueModel,
     SourceType,
+    infer_revenue_model_enum,
 )
 
 
@@ -171,3 +177,86 @@ def test_create_company_profile_wires_qualitative_and_risk_fields():
     dumped = profile.model_dump(mode="json")
     restored = CompanyProfile.model_validate(dumped)
     assert restored.business_profile == profile.business_profile
+    assert restored.revenue_model_type == RevenueModel.RECURRING_SUBSCRIPTION
+    assert restored.geography_region == GeographyRegion.US
+
+
+def test_slice1_preserves_fiscal_year_provenance_and_logs_inconsistencies():
+    answers = {
+        "company_name": "SignalOps SaaS",
+        "business_description": "Cloud monitoring SaaS.",
+        "industry": Industry.APPLICATION_SOFTWARE.value,
+        "sub_industry": "not_a_valid_niche",
+        "customer_type": "invalid_cust",
+        "geography": "United States",
+        "revenue": "10000000",
+        "ebitda": "2000000",
+        "ebitda_period": "FY2025",
+        "adjustment_items": [
+            {
+                "category": "owner_compensation",
+                "description": "Above-market owner salary",
+                "amount": "150000",
+                "confidence": 0.72,
+                "evidence_quote": "owner takes 150k extra",
+                "quote_verified": False,
+                "inference_source": "llm_inferred",
+            }
+        ],
+        "inference_provenance": {
+            "industry": FieldInference(
+                field_name="industry",
+                value="application_software",
+                confidence=0.88,
+                evidence_quote="fabricated quote",
+                quote_verified=False,
+                source=InferenceSource.LLM_INFERRED,
+            )
+        },
+    }
+    profile, schedule = create_company_profile_from_intake(answers)
+    assert profile.ebitda_period == "FY"
+    assert profile.target_fiscal_year == 2025
+    assert profile.geography_region == GeographyRegion.US
+    assert profile.inconsistencies
+    assert any("sub_industry" in inc for inc in profile.inconsistencies)
+    assert any("customer_type" in inc for inc in profile.inconsistencies)
+    assert any("unverified evidence quote" in inc for inc in profile.inconsistencies)
+    assert any("lacks a verified verbatim quote" in inc for inc in profile.inconsistencies)
+    pts = schedule.to_datapoints(period="FY")
+    adj_pt = next(p for p in pts if p.metric == "adj_owner_compensation")
+    assert "UNVERIFIED quote=" in adj_pt.source_ref
+    assert "conf=0.72" in adj_pt.source_ref
+
+
+def test_non_recurring_income_line_item_always_reduces_ebitda_regardless_of_sign():
+    """Verify both negative and positive magnitude non_recurring_income line items subtract cleanly."""
+    neg_item = AdjustmentLineItem(
+        category=AdjustmentCategory.NON_RECURRING_INCOME,
+        description="One-time asset sale gain",
+        amount=Decimal("-100000"),
+    )
+    sched_neg = EbitdaAdjustmentSchedule.from_line_items(Decimal("1000000"), [neg_item])
+    assert sched_neg.non_recurring_income == Decimal("100000")
+    assert sched_neg.total_adjustments == Decimal("-100000")
+    assert sched_neg.normalized_ebitda == Decimal("900000")
+    pts_neg = {p.metric: p for p in sched_neg.to_datapoints(period="FY", period_end=date(2025, 12, 31))}
+    assert pts_neg["adj_non_recurring_income"].value == Decimal("-100000")
+    assert pts_neg["adj_non_recurring_income"].period_end == date(2025, 12, 31)
+
+    pos_item = AdjustmentLineItem(
+        category=AdjustmentCategory.NON_RECURRING_INCOME,
+        description="One-time grant",
+        amount=Decimal("100000"),
+    )
+    sched_pos = EbitdaAdjustmentSchedule.from_line_items(Decimal("1000000"), [pos_item])
+    assert sched_pos.total_adjustments == Decimal("-100000")
+    assert sched_pos.normalized_ebitda == Decimal("900000")
+    assert sched_pos.line_items[0].amount == Decimal("-100000")
+
+
+def test_infer_revenue_model_enum_one_time_license_fee_vs_transactional():
+    assert infer_revenue_model_enum("one-time license fee") == RevenueModel.ONE_OFF_SALES
+    assert infer_revenue_model_enum("one-time setup fee") == RevenueModel.ONE_OFF_SALES
+    assert infer_revenue_model_enum("per-transaction usage fee") == RevenueModel.TRANSACTIONAL_USAGE
+    assert infer_revenue_model_enum("annual subscriptions") == RevenueModel.RECURRING_SUBSCRIPTION

@@ -29,7 +29,6 @@ from zoneinfo import ZoneInfo
 from covenant_ai.domain.industry import INDUSTRIES, Industry
 from covenant_ai.providers.edgar import (
     ANNUAL_FORMS,
-    DEFAULT_USER_AGENT,
     QUARTERLY_FORMS,
     TAG_CASH,
     TAG_DA_COMBINED,

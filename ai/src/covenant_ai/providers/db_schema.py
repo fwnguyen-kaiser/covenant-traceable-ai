@@ -53,6 +53,12 @@ SCHEMA_MIGRATIONS: tuple[str, ...] = (
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_peer_candidates_run ON peer_candidates(run_id);",
+    "ALTER TABLE cases ALTER COLUMN status SET DEFAULT 'active';",
+    "ALTER TABLE valuation_results ADD COLUMN IF NOT EXISTS explanation_md TEXT;",
+    "ALTER TABLE valuation_results ADD COLUMN IF NOT EXISTS narrative_md TEXT;",
+    "ALTER TABLE valuation_results ADD COLUMN IF NOT EXISTS audit_verdict VARCHAR(20);",
+    "ALTER TABLE valuation_results ADD COLUMN IF NOT EXISTS audit_findings JSONB DEFAULT '[]'::jsonb;",
+    "ALTER TABLE valuation_results ADD COLUMN IF NOT EXISTS prompt_version VARCHAR(50);",
 )
 
 

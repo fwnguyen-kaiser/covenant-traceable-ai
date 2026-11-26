@@ -7,12 +7,13 @@ from covenant_ai.cli import run_cli
 from covenant_ai.providers.db_schema import normalize_db_url
 
 
-def test_cli_pause_resume_and_full_postgres_persistence(tmp_path):
+def test_cli_pause_resume_and_full_postgres_persistence(tmp_path, monkeypatch):
     """End-to-end persistence integration test:
     1. Start CLI run from JSON intake -> pause at first HITL interrupt (--pause-after-intake)
     2. Resume via PostgresSaver (--resume <thread_id>) with auto-approve -> export MD/JSON
     3. Verify PostgresSaver checkpoints + domain audit tables without warnings
     """
+    monkeypatch.setenv("COVENANT_DISABLE_LLM", "1")
     db_url = normalize_db_url()
     thread_id = f"cli-e2e-{uuid4().hex[:10]}"
     intake_file = tmp_path / "intake.json"
@@ -98,6 +99,7 @@ def test_cli_pause_resume_and_full_postgres_persistence(tmp_path):
 
 def test_cli_does_not_audit_log_rejected_hitl_retries(tmp_path, monkeypatch):
     """Rejected HITL validation retries must NOT record false confirmation audit rows."""
+    monkeypatch.setenv("COVENANT_DISABLE_LLM", "1")
     db_url = normalize_db_url()
     thread_id = f"cli-hitl-retry-{uuid4().hex[:10]}"
     intake_file = tmp_path / "intake.json"

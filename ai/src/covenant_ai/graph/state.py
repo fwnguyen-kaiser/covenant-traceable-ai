@@ -77,3 +77,23 @@ class ValuationState(TypedDict):
     # Valuation & Explanation
     valuation: NotRequired[dict]
     explanation: NotRequired[str]
+
+    # LLM Intake, Provenance, Narrative & Self-Audit (all JSON-safe)
+    raw_input: NotRequired[str]
+    locked_intake_fields: NotRequired[dict[str, Any]]
+    explain_mode: NotRequired[str]
+    intake_provenance: NotRequired[dict[str, Any]]
+    inconsistencies: NotRequired[list[str]]
+    clarify_needed: NotRequired[bool]
+    clarify_payload: NotRequired[dict[str, Any]]
+    intake_clarify_count: NotRequired[int]
+    narrative_raw: NotRequired[str]
+    narrative_md: NotRequired[str]
+    narrative_unknown_keys: NotRequired[list[str]]
+    fact_pack: NotRequired[dict[str, Any]]
+    audit_verdict: NotRequired[str]
+    audit_findings: NotRequired[list[dict[str, Any]]]
+    audit_retry_count: NotRequired[int]
+    needs_audit_retry: NotRequired[bool]
+    audit_fallback_used: NotRequired[bool]
+    prompt_version: NotRequired[str]

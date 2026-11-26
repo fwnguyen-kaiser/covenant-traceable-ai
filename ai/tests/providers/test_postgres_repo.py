@@ -58,6 +58,11 @@ def test_postgres_case_repository_roundtrip_live_db():
             "failed_peers": {"BAD": "missing_10k"},
             "peer_screening_results": [score],
             "ledger": [dp],
+            "explanation": "### Report\nSample explanation",
+            "narrative_md": "Sample IB narrative",
+            "audit_verdict": "pass",
+            "audit_findings": [{"rule": "placeholder_tie_out", "severity": "info", "message": "ok"}],
+            "prompt_version": "EXPLAIN_V1",
             "valuation": {
                 "ev_low": "32000000",
                 "ev_mid": "40000000",
@@ -83,8 +88,17 @@ def test_postgres_case_repository_roundtrip_live_db():
                 assert cur.fetchall() == [("BAD", "failed"), ("BJRI", "selected")]
                 cur.execute("SELECT COUNT(*) FROM financial_datapoints WHERE run_id = %s;", (str(run_id),))
                 assert cur.fetchone()[0] == 1
-                cur.execute("SELECT ev_mid FROM valuation_results WHERE run_id = %s;", (str(run_id),))
-                assert Decimal(cur.fetchone()[0]) == Decimal("40000000")
+                cur.execute(
+                    "SELECT ev_mid, explanation_md, narrative_md, audit_verdict, prompt_version "
+                    "FROM valuation_results WHERE run_id = %s;",
+                    (str(run_id),),
+                )
+                row = cur.fetchone()
+                assert Decimal(row[0]) == Decimal("40000000")
+                assert row[1] == "### Report\nSample explanation"
+                assert row[2] == "Sample IB narrative"
+                assert row[3] == "pass"
+                assert row[4] == "EXPLAIN_V1"
     finally:
         if case_id is not None:
             with psycopg.connect(repo.db_url) as conn:

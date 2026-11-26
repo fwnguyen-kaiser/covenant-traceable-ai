@@ -26,6 +26,7 @@ from covenant_ai.domain.industry import candidate_pool
 from covenant_ai.domain.models import FinancialDatapoint, SourceType
 from covenant_ai.domain.screening import PeerScreeningCandidate
 from covenant_ai.providers.base import MarketDataProvider
+from covenant_ai.providers.db_schema import _read_env_var
 from covenant_ai.providers.market_calendar import (
     is_non_trading_cover_date,
     parse_yahoo_chart_closes,
@@ -34,8 +35,16 @@ from covenant_ai.providers.market_calendar import (
 ANNUAL_FORMS: tuple[str, ...] = ("10-K", "10-K/A")
 QUARTERLY_FORMS: tuple[str, ...] = ("10-Q", "10-Q/A")
 
-DEFAULT_USER_AGENT = "Friedrich fwnguyen1112@gmail.com"
+DEFAULT_USER_AGENT = "CovenantResearch contact@example.com"
 RATE_LIMIT_SLEEP = 0.15
+
+
+def resolve_sec_user_agent(explicit: str | None = None) -> str:
+    """Resolve SEC EDGAR User-Agent from explicit arg -> SEC_USER_AGENT env/.env -> placeholder."""
+    if explicit and explicit.strip():
+        return explicit.strip()
+    env_ua = _read_env_var("SEC_USER_AGENT")
+    return env_ua.strip() if env_ua and env_ua.strip() else DEFAULT_USER_AGENT
 
 # Candidate tags in priority order
 TAG_INCOME_CONTINUING = (
@@ -231,7 +240,7 @@ class EdgarMarketDataProvider:
     def __init__(
         self,
         cache_dir: Path | str | None = None,
-        user_agent: str = DEFAULT_USER_AGENT,
+        user_agent: str | None = None,
         rate_limit_sleep: float = RATE_LIMIT_SLEEP,
         snapshot_prices: dict[str, Decimal] | None = None,
         snapshot_price_dates: dict[str, date] | None = None,
@@ -240,7 +249,7 @@ class EdgarMarketDataProvider:
         allow_on_demand_yahoo: bool = False,
     ) -> None:
         self.cache_dir = _resolve_cache_dir(cache_dir)
-        self.user_agent = user_agent
+        self.user_agent = resolve_sec_user_agent(user_agent)
         self.rate_limit_sleep = rate_limit_sleep
         self.allow_on_demand_yahoo = allow_on_demand_yahoo
         csv_path = snapshot_csv or os.getenv("MARKET_PRICE_SNAPSHOT_CSV")

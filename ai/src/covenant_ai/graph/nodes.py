@@ -8,6 +8,7 @@ Architecture:
     1. confirm_industry: confirm/edit industry classification.
     2. peer_review: review/modify the selected peer candidates.
 """
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
@@ -15,11 +16,15 @@ from langgraph.types import interrupt
 
 from covenant_ai.domain.bridge import build_peer_financials
 from covenant_ai.domain.errors import MissingFieldError, ValuationError
-from covenant_ai.domain.industry import Industry, candidate_pool
+from covenant_ai.domain.industry import Industry, candidate_pool, is_valid_sub_industry
 from covenant_ai.domain.intake import create_company_profile_from_intake
 from covenant_ai.domain.models import (
+    AuditVerdict,
     CompanyProfile,
     EbitdaAdjustmentSchedule,
+    ExplainMode,
+    FieldInference,
+    InferenceSource,
     PeerFinancials,
 )
 from covenant_ai.domain.screening import (
@@ -34,82 +39,241 @@ from covenant_ai.domain.valuation import (
     indicative_valuation,
 )
 from covenant_ai.graph.state import ValuationState
+from covenant_ai.llm.audit_agent import audit_narrative
+from covenant_ai.llm.client import LLMClient
+from covenant_ai.llm.fact_pack import (
+    LockedFactPack,
+    build_deterministic_takeaways,
+    build_fact_pack,
+)
+from covenant_ai.llm.intake_agent import extract_intake_from_text
+from covenant_ai.llm.narrative_agent import draft_hybrid_narrative
+from covenant_ai.llm.prompts import PROMPT_VERSION_EXPLAIN
 from covenant_ai.providers.base import MarketDataProvider
 from covenant_ai.tools.fetch import fetch_peer_financials
 
 MAX_RETRIES = 2
+MAX_AUDIT_RETRIES = 2
+MAX_INTAKE_CLARIFY = 3
 
 # Candidate pool mapping (industry -> candidate tickers) loaded from verified SIC industry taxonomy
 DEFAULT_CANDIDATE_POOL: dict[str, list[str]] = candidate_pool()
 
 
-def intake_node(state: ValuationState) -> dict[str, Any]:
-    """Intake node: collects target profile, processes EBITDA normalization, and proposes industry.
+def make_intake_node(llm_client: LLMClient | None = None):
+    """Factory creating intake_node supporting both structured inputs and raw_input text."""
 
-    Accepts either:
-    1. intake_answers: dict answering the intake interview question bank.
-    2. company_profile: directly provided CompanyProfile (with optional adjustment_schedule).
-    3. target_ebitda: numeric target EBITDA fallback.
+    def intake_node(state: ValuationState) -> dict[str, Any]:
+        """Collect target profile, run optional LLM extraction + quote verification, and prepare EBITDA schedule."""
+        profile = state.get("company_profile")
+        target_ebitda = state.get("target_ebitda")
+        target_period = state.get("target_period", "FY")
+        intake_answers = state.get("intake_answers")
+        schedule = state.get("adjustment_schedule")
+        raw_input = state.get("raw_input")
 
-    Raises ValueError if none of these are provided or required answers are missing.
-    """
-    profile = state.get("company_profile")
-    target_ebitda = state.get("target_ebitda")
-    target_period = state.get("target_period", "FY")
-    intake_answers = state.get("intake_answers")
-    schedule = state.get("adjustment_schedule")
+        ledger_updates = []
+        default_ind = Industry.APPLICATION_SOFTWARE.value
+        inconsistencies: list[str] = list(state.get("inconsistencies") or [])
+        prov_json: dict[str, Any] = dict(state.get("intake_provenance") or {})
 
-    ledger_updates = []
-    default_ind = Industry.APPLICATION_SOFTWARE.value
+        if raw_input and profile is None:
+            if llm_client is None:
+                raise ValueError("raw_input intake requires an active LLMClient")
+            prep = extract_intake_from_text(
+                llm_client,
+                raw_input,
+                existing_answers=intake_answers,
+                locked_overrides=state.get("locked_intake_fields"),
+            )
+            inconsistencies = list(dict.fromkeys([*inconsistencies, *prep.inconsistencies]))
+            if prep.provenance:
+                prov_json = {k: v.model_dump(mode="json") for k, v in prep.provenance.items()}
+            json_answers = dict(prep.merged_answers)
+            if "inference_provenance" in json_answers:
+                json_answers["inference_provenance"] = {
+                    k: (v.model_dump(mode="json") if hasattr(v, "model_dump") else v)
+                    for k, v in json_answers["inference_provenance"].items()
+                }
+            if "inconsistencies" in json_answers:
+                json_answers["inconsistencies"] = inconsistencies
 
-    if intake_answers:
-        profile, schedule = create_company_profile_from_intake(intake_answers)
-        ledger_updates.extend(schedule.to_datapoints(period=profile.ebitda_period))
-    elif profile is None:
-        if target_ebitda is None:
-            raise ValueError("intake requires company_profile or target_ebitda")
-        profile = CompanyProfile(
-            company_name="Target Company",
-            industry=state.get("industry_enum", default_ind),
-            geography="US",
-            revenue=None,
-            ebitda=target_ebitda,
-            ebitda_period=target_period,
-        )
-    elif profile.adjustment_schedule:
-        schedule = profile.adjustment_schedule
-        ledger_updates.extend(schedule.to_datapoints(period=profile.ebitda_period))
-    elif schedule:
-        profile.adjustment_schedule = schedule
-        profile.ebitda = schedule.normalized_ebitda
-        ledger_updates.extend(schedule.to_datapoints(period=profile.ebitda_period))
+            if prep.clarify_needed:
+                clarify_count = int(state.get("intake_clarify_count") or 0)
+                if clarify_count >= MAX_INTAKE_CLARIFY:
+                    raise ValueError(
+                        "Intake clarification exceeded maximum retries: "
+                        + "; ".join(prep.clarify_payload.get("questions") or [])
+                    )
+                return {
+                    "intake_answers": json_answers,
+                    "clarify_needed": True,
+                    "clarify_payload": prep.clarify_payload,
+                    "intake_provenance": prov_json,
+                    "inconsistencies": inconsistencies,
+                }
 
-    proposed_industry = state.get("industry_enum") or profile.industry or default_ind
+            profile, schedule = create_company_profile_from_intake(json_answers)
+            ledger_updates.extend(
+                schedule.to_datapoints(
+                    period=profile.ebitda_period,
+                    period_end=profile.period_end_date,
+                )
+            )
+            intake_answers = json_answers
+        elif intake_answers and profile is None:
+            profile, schedule = create_company_profile_from_intake(intake_answers)
+            ledger_updates.extend(
+                schedule.to_datapoints(
+                    period=profile.ebitda_period,
+                    period_end=profile.period_end_date,
+                )
+            )
+        elif profile is None:
+            if target_ebitda is None:
+                raise ValueError("intake requires company_profile or target_ebitda")
+            profile = CompanyProfile(
+                company_name="Target Company",
+                industry=state.get("industry_enum", default_ind),
+                geography="US",
+                revenue=None,
+                ebitda=target_ebitda,
+                ebitda_period=target_period,
+            )
+        elif profile.adjustment_schedule:
+            schedule = profile.adjustment_schedule
+            ledger_updates.extend(
+                schedule.to_datapoints(
+                    period=profile.ebitda_period,
+                    period_end=profile.period_end_date,
+                )
+            )
+        elif schedule:
+            profile.adjustment_schedule = schedule
+            profile.ebitda = schedule.normalized_ebitda
+            ledger_updates.extend(
+                schedule.to_datapoints(
+                    period=profile.ebitda_period,
+                    period_end=profile.period_end_date,
+                )
+            )
 
-    out: dict[str, Any] = {
-        "company_profile": profile,
-        "target_ebitda": profile.ebitda,
-        "target_period": profile.ebitda_period,
-        "industry_enum": proposed_industry,
-    }
-    if schedule:
-        out["adjustment_schedule"] = schedule
-    if ledger_updates:
-        out["ledger"] = ledger_updates
-    return out
+        inconsistencies = list(dict.fromkeys([*inconsistencies, *profile.inconsistencies]))
+        if profile.inference_provenance and not prov_json:
+            prov_json = {k: v.model_dump(mode="json") for k, v in profile.inference_provenance.items()}
+
+        proposed_industry = state.get("industry_enum") or profile.industry or default_ind
+
+        out: dict[str, Any] = {
+            "company_profile": profile,
+            "target_ebitda": profile.ebitda,
+            "target_period": profile.ebitda_period,
+            "industry_enum": proposed_industry,
+            "clarify_needed": False,
+            "intake_provenance": prov_json,
+            "inconsistencies": inconsistencies,
+        }
+        if intake_answers is not None:
+            out["intake_answers"] = intake_answers
+        if schedule:
+            out["adjustment_schedule"] = schedule
+        if ledger_updates:
+            out["ledger"] = ledger_updates
+        return out
+
+    return intake_node
+
+
+intake_node = make_intake_node(None)
+
+
+def route_intake(state: ValuationState) -> str:
+    """Route to clarify HITL when required fields, USD check, or sanity validation need user input."""
+    if state.get("clarify_needed"):
+        return "intake_clarify"
+    return "confirm_industry"
+
+
+def intake_clarify_node(state: ValuationState) -> dict[str, Any]:
+    """Pure deterministic interrupt node collecting missing/clarified details before intake re-runs."""
+    payload: dict[str, Any] = dict(state.get("clarify_payload") or {"action": "intake_clarify", "questions": []})
+    while True:
+        res = interrupt(payload)
+        raw_prev = state.get("raw_input") or ""
+        answers_prev = dict(state.get("intake_answers") or {})
+        locked_prev = dict(state.get("locked_intake_fields") or {})
+        clarify_count = int(state.get("intake_clarify_count") or 0) + 1
+
+        if isinstance(res, dict):
+            msg = str(res.get("text") or res.get("answer") or res.get("message") or "").strip()
+            has_structured = False
+            for k, v in res.items():
+                if k not in {"text", "answer", "message"} and v not in (None, ""):
+                    answers_prev[k] = v
+                    locked_prev[k] = v
+                    has_structured = True
+            if msg or has_structured:
+                new_raw = f"{raw_prev}\nUser clarification: {msg}" if msg else raw_prev
+                return {
+                    "raw_input": new_raw.strip(),
+                    "intake_answers": answers_prev,
+                    "locked_intake_fields": locked_prev,
+                    "clarify_needed": False,
+                    "intake_clarify_count": clarify_count,
+                }
+        elif isinstance(res, str) and res.strip():
+            new_raw = f"{raw_prev}\nUser clarification: {res.strip()}"
+            return {
+                "raw_input": new_raw.strip(),
+                "intake_answers": answers_prev,
+                "locked_intake_fields": locked_prev,
+                "clarify_needed": False,
+                "intake_clarify_count": clarify_count,
+            }
+
+        payload = {
+            **payload,
+            "error": "Please provide the requested financial or business clarification details.",
+        }
 
 
 def confirm_industry_node(state: ValuationState) -> dict[str, Any]:
     """HITL checkpoint 1: pause for user to confirm or edit proposed industry enum.
 
-    Validates against DEFAULT_CANDIDATE_POOL; loops with error payload if unsupported.
+    Pure interrupt() loop (no LLM call inside). Surfaces read-only EBITDA & provenance summary.
     """
     default_ind = Industry.APPLICATION_SOFTWARE.value
     proposed = state.get("industry_enum", default_ind)
+    profile = state.get("company_profile")
+    schedule = state.get("adjustment_schedule") or (profile.adjustment_schedule if profile else None)
+
+    ebitda_summary: dict[str, Any] | None = None
+    if profile is not None:
+        ebitda_summary = {
+            "reported_ebitda": str(profile.reported_ebitda) if profile.reported_ebitda is not None else None,
+            "total_adjustments": str(schedule.total_adjustments) if schedule is not None else "0",
+            "normalized_ebitda": str(profile.ebitda),
+            "ebitda_period": profile.ebitda_period,
+            "target_fiscal_year": profile.target_fiscal_year,
+        }
+
     payload: dict[str, Any] = {
         "action": "confirm_industry",
         "proposed": proposed,
         "allowed": sorted(DEFAULT_CANDIDATE_POOL),
+        "sub_industry": (
+            profile.business_profile.sub_industry
+            if profile and profile.business_profile and profile.business_profile.sub_industry
+            else None
+        ),
+        "customer_type": (
+            list(profile.business_profile.customers)
+            if profile and profile.business_profile and profile.business_profile.customers
+            else None
+        ),
+        "ebitda_summary": ebitda_summary,
+        "provenance": state.get("intake_provenance") or {},
+        "inconsistencies": list(state.get("inconsistencies") or []),
     }
     while True:
         res = interrupt(payload)
@@ -117,7 +281,49 @@ def confirm_industry_node(state: ValuationState) -> dict[str, Any]:
             res = res.get("confirmed_industry") or res.get("industry")
         confirmed = res.strip() if isinstance(res, str) and res.strip() else proposed
         if confirmed in DEFAULT_CANDIDATE_POOL:
-            return {"industry_enum": confirmed, "industry_confirmed": True}
+            updates: dict[str, Any] = {"industry_enum": confirmed, "industry_confirmed": True}
+            if profile is not None and confirmed != profile.industry:
+                prior_ind = profile.industry
+                notes = [
+                    f"User updated industry classification from {prior_ind!r} to {confirmed!r} at confirm_industry."
+                ]
+                updated_biz = profile.business_profile
+                if updated_biz is not None:
+                    new_sub = updated_biz.sub_industry
+                    if new_sub and not is_valid_sub_industry(confirmed, new_sub):
+                        notes.append(
+                            f"Cleared inferred sub_industry {new_sub!r} because user changed industry "
+                            f"from {prior_ind!r} to {confirmed!r}."
+                        )
+                        new_sub = ""
+                    updated_biz = replace(updated_biz, sector=confirmed, sub_industry=new_sub)
+
+                new_prov = dict(profile.inference_provenance)
+                confirmed_fi = FieldInference(
+                    field_name="industry",
+                    value=confirmed,
+                    confidence=1.0,
+                    evidence_quote="confirmed in HITL confirm_industry",
+                    quote_verified=True,
+                    source=InferenceSource.USER_CONFIRMED,
+                )
+                new_prov["industry"] = confirmed_fi
+                updated_inc = list(dict.fromkeys([*profile.inconsistencies, *notes]))
+                updates["company_profile"] = profile.model_copy(
+                    update={
+                        "industry": confirmed,
+                        "business_profile": updated_biz,
+                        "inference_provenance": new_prov,
+                        "inconsistencies": updated_inc,
+                    }
+                )
+                state_prov = dict(state.get("intake_provenance") or {})
+                state_prov["industry"] = confirmed_fi.model_dump(mode="json")
+                updates["intake_provenance"] = state_prov
+                updates["inconsistencies"] = list(
+                    dict.fromkeys([*(state.get("inconsistencies") or []), *notes])
+                )
+            return updates
         payload = {**payload, "error": f"Unsupported industry: {confirmed!r}"}
 
 
@@ -474,12 +680,9 @@ def _fmt_money(val: Any) -> str:
         return f"${val}"
 
 
-def explain_node(state: ValuationState) -> dict[str, Any]:
-    """Pitchbook explain node: formats ValuationResult, Comps Table, and bridges into markdown."""
-    val = state.get("valuation")
-    if not val:
-        return {"explanation": "No valuation result available."}
-
+def _build_report_body_lines(state: ValuationState) -> tuple[str, list[str]]:
+    """Build locked deterministic Markdown title & body sections from ValuationResult."""
+    val = state.get("valuation") or {}
     target_ebitda = state.get("target_ebitda")
     period = state.get("target_period", "FY")
     ev_low = val.get("ev_low")
@@ -499,15 +702,20 @@ def explain_node(state: ValuationState) -> dict[str, Any]:
     profile = state.get("company_profile")
     schedule = state.get("adjustment_schedule") or (profile.adjustment_schedule if profile else None)
 
+    period_label = period
+    if profile is not None:
+        if period == "FY" and profile.target_fiscal_year is not None:
+            period_label = f"FY{profile.target_fiscal_year}"
+        elif period == "LTM" and profile.period_end_date is not None:
+            period_label = f"LTM ending {profile.period_end_date.isoformat()}"
+
     ebitda_str = _fmt_money(target_ebitda)
     report_title = (
-        f"### Indicative Valuation Report — {profile.company_name} ({period})"
+        f"### Indicative Valuation Report — {profile.company_name} ({period_label})"
         if profile and profile.company_name
-        else f"### Indicative Valuation Report ({period})"
+        else f"### Indicative Valuation Report ({period_label})"
     )
     lines = [
-        report_title,
-        "",
         "### 1. Valuation Summary",
         f"- **Primary Metric (EV/EBITDA)**: Implied EV Range: **{_fmt_money(ev_low)}** – **{_fmt_money(ev_high)}** (Midpoint: **{_fmt_money(ev_mid)}**)",
     ]
@@ -521,7 +729,7 @@ def explain_node(state: ValuationState) -> dict[str, Any]:
         )
         t_net_debt = Decimal(str(val.get("target_net_debt", 0)))
         t_ev_low = Decimal(str(val.get("ev_low", 0)))
-        if t_net_debt > 0 and t_net_debt >= t_ev_low:
+        if t_net_debt > 0 and t_ev_low > 0 and t_net_debt >= t_ev_low:
             lines.append(
                 f"  > ⚠️ **CAPITAL STRUCTURE WARNING (High Leverage / Distressed):** Target Net Debt ({_fmt_money(t_net_debt)}) exceeds implied Enterprise Value at lower/mid valuations. Common equity value is partially or fully impaired ($0.00) without debt restructuring."
             )
@@ -587,7 +795,6 @@ def explain_node(state: ValuationState) -> dict[str, Any]:
         if peer.market_cap_source_ref:
             lines.append(f"- {peer.ticker}: {peer.market_cap_source_ref}")
 
-    # Standard Wall Street Comps Summary Statistics Box
     if "ev_ebitda" in peer_stats:
         eb_stats = peer_stats["ev_ebitda"]
         sl_stats = peer_stats.get("ev_sales", {})
@@ -601,7 +808,6 @@ def explain_node(state: ValuationState) -> dict[str, Any]:
             f"| Low (Min) | — | — | {Decimal(str(eb_stats['min'])):.2f}x | {Decimal(str(sl_stats['min'])):.2f}x | Bottom of Range |" if "min" in sl_stats else f"| Low (Min) | — | — | {Decimal(str(eb_stats['min'])):.2f}x | N/A | Bottom of Range |",
         ])
 
-    # Historical compatibility: also list peer multiples as bullet list
     lines.extend(["", "#### Peer Multiples Used:"])
     for ticker, m in multiples.items():
         flag_str = f" [Flag: {outlier_flags[ticker]}]" if ticker in outlier_flags else ""
@@ -634,4 +840,276 @@ def explain_node(state: ValuationState) -> dict[str, Any]:
                 f"- {r['ticker']} (Rank #{r.get('rank_order')}, Score {r.get('total_score')}): {r.get('rationale')}"
             )
 
-    return {"explanation": "\n".join(lines)}
+    return report_title, lines
+
+
+def _assemble_full_report(
+    state: ValuationState,
+    *,
+    narrative_md: str,
+    inconsistencies: list[str],
+    audit_verdict: str | None = None,
+    audit_findings: list[dict[str, Any]] | None = None,
+    audit_fallback_used: bool = False,
+) -> str:
+    """Assemble header, Section 0 commentary, locked numeric tables, and audit disclosure."""
+    report_title, body_lines = _build_report_body_lines(state)
+    sections = [report_title]
+    if narrative_md.strip():
+        sections.extend(["", narrative_md.strip()])
+    sections.extend(["", *body_lines])
+
+    dedup_inc = list(dict.fromkeys(inconsistencies))
+    findings = list(audit_findings or [])
+    if dedup_inc or audit_verdict or audit_fallback_used or findings:
+        sections.extend(["", "#### Audit Status & Disclosed Process Inconsistencies"])
+        if audit_verdict:
+            mode_note = " (Safe Deterministic Fallback Applied)" if audit_fallback_used else ""
+            sections.append(f"- Audit Verdict: {audit_verdict.upper()}{mode_note}")
+        for inc in dedup_inc:
+            sections.append(f"- Inconsistency Note: {inc}")
+        for f in findings:
+            sev = str(f.get("severity", "info")).upper()
+            sections.append(f"- [{sev}] {f.get('rule')}: {f.get('message')}")
+    return "\n".join(sections)
+
+
+def _serialize_fact_pack(pack: LockedFactPack) -> dict[str, Any]:
+    return {
+        "facts": dict(pack.facts),
+        "descriptions": dict(pack.descriptions),
+        "required_risk_topics": list(pack.required_risk_topics),
+        "peer_tickers": list(pack.peer_tickers),
+        "inconsistencies": list(pack.inconsistencies),
+        "limitations": list(pack.limitations),
+    }
+
+
+def _restore_fact_pack(data: dict[str, Any]) -> LockedFactPack:
+    return LockedFactPack(
+        facts=dict(data.get("facts") or {}),
+        descriptions=dict(data.get("descriptions") or {}),
+        required_risk_topics=list(data.get("required_risk_topics") or []),
+        peer_tickers=tuple(data.get("peer_tickers") or ()),
+        inconsistencies=tuple(data.get("inconsistencies") or ()),
+        limitations=tuple(data.get("limitations") or ()),
+    )
+
+
+def make_explain_node(
+    llm_client: LLMClient | None = None,
+    *,
+    default_explain_mode: str = ExplainMode.LLM_HYBRID.value,
+):
+    """Factory creating Pitchbook explain node with locked tables + Hybrid/Deterministic commentary."""
+
+    def explain_node(state: ValuationState) -> dict[str, Any]:
+        val = state.get("valuation")
+        if not val:
+            return {"explanation": "No valuation result available."}
+
+        fact_pack = build_fact_pack(state)
+        inconsistencies = list(fact_pack.inconsistencies)
+        requested_mode = str(state.get("explain_mode") or default_explain_mode).strip().lower()
+        prior_findings = state.get("audit_findings") or []
+
+        narrative_raw = ""
+        narrative_md = ""
+        unknown_keys: list[str] = []
+        prompt_ver = "DETERMINISTIC_V1"
+        fallback_used = bool(state.get("audit_fallback_used"))
+
+        if requested_mode == ExplainMode.LLM_HYBRID.value and llm_client is not None:
+            try:
+                narrative_raw, narrative_md, unknown_keys, prompt_ver = draft_hybrid_narrative(
+                    llm_client,
+                    fact_pack,
+                    state=state,
+                    prior_findings=prior_findings if prior_findings else None,
+                )
+            except Exception as exc:
+                inconsistencies.append(
+                    f"Hybrid LLM narrative call failed ({type(exc).__name__}: {exc}); fell back to deterministic Executive Summary."
+                )
+                narrative_md = build_deterministic_takeaways(fact_pack)
+                fallback_used = True
+        else:
+            if state.get("explain_mode") == ExplainMode.LLM_HYBRID.value and llm_client is None:
+                inconsistencies.append(
+                    "explain_mode='llm_hybrid' was requested with no active LLMClient; used deterministic Executive Summary."
+                )
+                fallback_used = True
+            narrative_md = build_deterministic_takeaways(fact_pack)
+
+        explanation = _assemble_full_report(
+            state,
+            narrative_md=narrative_md,
+            inconsistencies=inconsistencies,
+            audit_fallback_used=fallback_used,
+        )
+        return {
+            "explanation": explanation,
+            "narrative_raw": narrative_raw,
+            "narrative_md": narrative_md,
+            "narrative_unknown_keys": unknown_keys,
+            "fact_pack": _serialize_fact_pack(fact_pack),
+            "inconsistencies": list(dict.fromkeys(inconsistencies)),
+            "prompt_version": prompt_ver,
+            "audit_fallback_used": fallback_used,
+        }
+
+    return explain_node
+
+
+explain_node = make_explain_node(None, default_explain_mode=ExplainMode.DETERMINISTIC.value)
+
+
+def make_self_audit_node(llm_client: LLMClient | None = None):
+    """Factory creating the 2-tier Self-Audit verification gate after explain."""
+
+    def self_audit_node(state: ValuationState) -> dict[str, Any]:
+        if not state.get("valuation"):
+            return {"needs_audit_retry": False}
+
+        pack_raw = state.get("fact_pack")
+        fact_pack = _restore_fact_pack(pack_raw) if pack_raw else build_fact_pack(state)
+        narrative_raw = state.get("narrative_raw") or ""
+        narrative_md = state.get("narrative_md") or ""
+        unknown_keys = list(state.get("narrative_unknown_keys") or [])
+        inconsistencies = list(dict.fromkeys([*(state.get("inconsistencies") or []), *fact_pack.inconsistencies]))
+        retry_count = int(state.get("audit_retry_count") or 0)
+        fallback_used = bool(state.get("audit_fallback_used"))
+
+        if narrative_raw.strip():
+            try:
+                verdict, findings = audit_narrative(
+                    llm_client,
+                    raw_template=narrative_raw,
+                    rendered_md=narrative_md,
+                    fact_pack=fact_pack,
+                    unknown_keys=unknown_keys,
+                    state=state,
+                )
+            except Exception as exc:
+                err_msg = (
+                    f"Self-audit gate failed unexpectedly ({type(exc).__name__}: {exc}); "
+                    "reverted safely to deterministic Executive Summary."
+                )
+                inconsistencies.append(err_msg)
+                findings_dicts = [
+                    {"rule": "self_audit_exception", "severity": "warn", "message": err_msg}
+                ]
+                safe_narrative = build_deterministic_takeaways(fact_pack)
+                final_md = _assemble_full_report(
+                    state,
+                    narrative_md=safe_narrative,
+                    inconsistencies=inconsistencies,
+                    audit_verdict=AuditVerdict.WARN.value,
+                    audit_findings=findings_dicts,
+                    audit_fallback_used=True,
+                )
+                return {
+                    "narrative_md": safe_narrative,
+                    "explanation": final_md,
+                    "audit_verdict": AuditVerdict.WARN.value,
+                    "audit_findings": findings_dicts,
+                    "needs_audit_retry": False,
+                    "audit_fallback_used": True,
+                    "inconsistencies": list(dict.fromkeys(inconsistencies)),
+                }
+
+            findings_dicts = [f.model_dump(mode="json") for f in findings]
+            for f in findings:
+                if f.rule == "semantic_audit_unavailable":
+                    inconsistencies.append(f.message)
+            inconsistencies = list(dict.fromkeys(inconsistencies))
+
+            if verdict == AuditVerdict.FAIL:
+                if retry_count < MAX_AUDIT_RETRIES:
+                    return {
+                        "audit_verdict": verdict.value,
+                        "audit_findings": findings_dicts,
+                        "audit_retry_count": retry_count + 1,
+                        "needs_audit_retry": True,
+                        "inconsistencies": inconsistencies,
+                    }
+
+                # Retries exhausted -> Safe Deterministic Fallback (never expose unverified narrative)
+                fallback_msg = (
+                    f"Hybrid LLM narrative failed self-audit after {MAX_AUDIT_RETRIES} retries; "
+                    "reverted to deterministic Executive Summary."
+                )
+                inconsistencies.append(fallback_msg)
+                findings_dicts.append(
+                    {"rule": "safe_fallback_triggered", "severity": "warn", "message": fallback_msg}
+                )
+                safe_narrative = build_deterministic_takeaways(fact_pack)
+                final_md = _assemble_full_report(
+                    state,
+                    narrative_md=safe_narrative,
+                    inconsistencies=inconsistencies,
+                    audit_verdict=AuditVerdict.WARN.value,
+                    audit_findings=findings_dicts,
+                    audit_fallback_used=True,
+                )
+                return {
+                    "narrative_md": safe_narrative,
+                    "explanation": final_md,
+                    "audit_verdict": AuditVerdict.WARN.value,
+                    "audit_findings": findings_dicts,
+                    "needs_audit_retry": False,
+                    "audit_fallback_used": True,
+                    "inconsistencies": list(dict.fromkeys(inconsistencies)),
+                }
+
+            final_md = _assemble_full_report(
+                state,
+                narrative_md=narrative_md,
+                inconsistencies=inconsistencies,
+                audit_verdict=verdict.value,
+                audit_findings=findings_dicts,
+                audit_fallback_used=fallback_used,
+            )
+            return {
+                "explanation": final_md,
+                "audit_verdict": verdict.value,
+                "audit_findings": findings_dicts,
+                "needs_audit_retry": False,
+                "inconsistencies": inconsistencies,
+            }
+
+        # Deterministic mode or pre-audit fallback path: surface any recorded inconsistencies transparently
+        findings_dicts: list[dict[str, Any]] = []
+        if inconsistencies:
+            findings_dicts.append(
+                {
+                    "rule": "recorded_inconsistencies",
+                    "severity": "warn",
+                    "message": f"Disclosed {len(inconsistencies)} recorded process/data inconsistency note(s).",
+                }
+            )
+        verdict_val = AuditVerdict.WARN.value if (inconsistencies or fallback_used) else AuditVerdict.PASS.value
+        final_md = _assemble_full_report(
+            state,
+            narrative_md=narrative_md,
+            inconsistencies=inconsistencies,
+            audit_verdict=verdict_val if (inconsistencies or fallback_used) else None,
+            audit_findings=findings_dicts,
+            audit_fallback_used=fallback_used,
+        )
+        return {
+            "explanation": final_md,
+            "audit_verdict": verdict_val,
+            "audit_findings": findings_dicts,
+            "needs_audit_retry": False,
+            "inconsistencies": inconsistencies,
+        }
+
+    return self_audit_node
+
+
+def route_audit(state: ValuationState) -> str:
+    """Loop back to explain on recoverable self-audit failure, otherwise terminate."""
+    if state.get("needs_audit_retry"):
+        return "explain"
+    return "end"
