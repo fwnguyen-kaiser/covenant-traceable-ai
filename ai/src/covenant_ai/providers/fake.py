@@ -6,9 +6,14 @@ from decimal import Decimal
 
 
 def with_raw_ebitda(data, da_ratio=Decimal("0.1")):
-    """Đổi fixture cũ (có sẵn 'ebitda') sang 4 dòng GAAP thô, giữ nguyên EBITDA.
+    """Convert a fixture that has a pre-computed 'ebitda' into the four raw GAAP
+    line items that bridge.py expects, preserving the original EBITDA total.
 
-    D&A = 10% EBITDA, interest = tax = 0, income_continuing_ops = phần còn lại.
+    Assumptions used for the split:
+      D&A = da_ratio * EBITDA  (default 10%)
+      interest_expense_net = 0
+      income_tax_expense   = 0
+      income_continuing_ops = EBITDA - D&A  (the remainder)
     """
     out = {}
     for ticker, metrics in data.items():
@@ -26,7 +31,7 @@ def with_raw_ebitda(data, da_ratio=Decimal("0.1")):
 
 
 DATA = with_raw_ebitda({
-    # ... DATA cũ giữ nguyên, kể cả "ebitda"
+    # Legacy fixture keys kept intact; "ebitda" is expanded to raw GAAP lines by with_raw_ebitda().
 })
 
 class FakeProvider:

@@ -23,7 +23,7 @@ def run_valuation(
     peers, ids, missing = [], [], {}
     for t in tickers:
         try:
-            peer, used = build_peer_financials(ledger, t)
+            peer, used = build_peer_financials(ledger, t, period=target_period)
         except MissingFieldError as e:
             missing[t] = e.missing
             continue

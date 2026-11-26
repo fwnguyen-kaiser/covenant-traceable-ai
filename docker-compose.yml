@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: covenant-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-covenant_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-covenant_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-covenant_secure_pass_2026}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-covenant_user} -d ${POSTGRES_DB:-covenant_ai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    profiles: ["post-mvp"]
+    image: redis:7-alpine
+    container_name: covenant-redis
+    restart: always
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Optional database visual management web UI
+  adminer:
+    image: adminer:latest
+    container_name: covenant-adminer
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+    name: covenant_postgres_data
+  redis_data:
+    name: covenant_redis_data

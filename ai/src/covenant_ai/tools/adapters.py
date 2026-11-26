@@ -17,14 +17,14 @@ def _msg(result: ToolResult, runtime: ToolRuntime) -> ToolMessage:
 
 
 def build_tools(provider: MarketDataProvider) -> list[BaseTool]:
-    """Provider được inject qua closure, không dùng biến global."""
+    """Provider is injected via closure; no module-level globals are used."""
 
     @tool("fetch_peer_financials")
     def fetch_peers(tickers: list[str], period: str, runtime: ToolRuntime) -> Command:
         """Fetch financials (market cap, debt, cash, EBITDA) for peer companies
         and store them in the ledger. Returns only which tickers succeeded or
-        failed, never the raw numbers. `period` must match the target's EBITDA
-        period, e.g. "LTM"."""
+        failed, never the raw numbers. The SEC comparable dataset currently
+        supports annual fiscal-year data (`FY`)."""
         result, new = fetch_peer_financials(provider, tickers, period)
         return Command(update={"ledger": new, "messages": [_msg(result, runtime)]})
 
