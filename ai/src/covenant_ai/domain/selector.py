@@ -1,11 +1,12 @@
 """Criteria-based selection of FinancialDatapoint from a ledger.
 
-Thay thế logic "lấy mới nhất theo ticker+metric" cũ trong bridge.py bằng
-criteria object có thể lọc theo ticker, metric, period, source type.
+Replaces the old "pick the latest by ticker+metric" logic in bridge.py with
+a criteria object that can filter by ticker, metric, period, and source type.
 
-Quan trọng tài chính:
-  - Sắp xếp theo period_end (ngày dữ liệu có hiệu lực), retrieved_at dùng làm tie-break.
-  - Khi nguồn xung đột: USER_PROVIDED > SEC_FILING > MARKET_DATA, và ghi lại lý do chọn.
+Financial-data rules:
+  - Sort by period_end (the date the data is effective); retrieved_at breaks ties.
+  - When sources conflict for the same metric, USER_PROVIDED > SEC_FILING >
+    MARKET_DATA; the reason for the choice is recorded in SelectionResult.reason.
 """
 
 from dataclasses import dataclass
@@ -14,7 +15,8 @@ from typing import Optional
 
 from covenant_ai.domain.models import FinancialDatapoint, SourceType
 
-# Thứ tự ưu tiên nguồn khi cùng metric bị trùng (càng cao càng ưu tiên)
+# Source priority when the same metric exists from multiple sources.
+# Higher integer = higher priority. Unknown sources default to 0.
 SOURCE_PRIORITY: dict[SourceType, int] = {
     SourceType.USER_PROVIDED: 3,
     SourceType.SEC_FILING: 2,
@@ -22,26 +24,26 @@ SOURCE_PRIORITY: dict[SourceType, int] = {
 }
 
 _SOURCE_LABELS = {
-    SourceType.USER_PROVIDED: "người dùng cung cấp",
-    SourceType.SEC_FILING: "báo cáo SEC",
-    SourceType.MARKET_DATA: "thị trường",
+    SourceType.USER_PROVIDED: "user-provided",
+    SourceType.SEC_FILING: "SEC filing",
+    SourceType.MARKET_DATA: "market data",
 }
 
 
 @dataclass(frozen=True)
 class DatapointCriteria:
-    """Filter + selection rule for one datapoint."""
+    """Filter and selection rule for one datapoint lookup."""
 
     ticker: str
     metric: str
-    period: str  # bắt buộc, vd "LTM", "FY-2024" — các peer phải cùng basis
-    source_type: Optional[SourceType] = None  # ép buộc nguồn nếu cần
-    pick_latest: bool = True  # True -> lấy period_end mới nhất
+    period: str           # required; e.g. "FY" or "LTM" -- all peers must share the same basis
+    source_type: Optional[SourceType] = None  # pin to a specific source when needed
+    pick_latest: bool = True  # True -> pick the datapoint with the most recent period_end
 
 
 @dataclass(frozen=True)
 class SelectionResult:
-    """Kết quả chọn một datapoint kèm lý do."""
+    """The chosen datapoint plus a human-readable explanation of why it was picked."""
 
     datapoint: Optional[FinancialDatapoint]
     reason: str
@@ -58,10 +60,13 @@ def select_datapoint(
     """Return the matching FinancialDatapoint plus a selection reason.
 
     Selection order:
-    1. Filter by peer_ticker, metric, period (bắt buộc cùng kỳ để so sánh apples-to-apples)
-    2. Optional filter by source_type
-    3. Nếu còn nhiều nguồn -> chọn nguồn ưu tiên cao nhất (user > sec > market)
-    4. Trong cùng nguồn -> sắp xếp theo period_end giảm dần, retrieved_at làm tie-break
+    1. Filter by peer_ticker, metric, period -- all peers must be on the same
+       basis for an apples-to-apples comparison.
+    2. Optional filter by source_type (when the caller pins a specific source).
+    3. If multiple sources remain, pick the highest-priority source
+       (user-provided > SEC filing > market data).
+    4. Within the winning source tier, sort by period_end descending;
+       retrieved_at breaks ties.
     """
     candidates = [
         d
@@ -77,28 +82,28 @@ def select_datapoint(
     if not candidates:
         return SelectionResult(
             None,
-            f"không tìm thấy {criteria.metric} cho {criteria.ticker} kỳ {criteria.period}",
+            f"no datapoint found for {criteria.metric} / {criteria.ticker} / period={criteria.period}",
         )
 
-    # Ưu tiên nguồn cao nhất còn tồn tại
+    # Keep only the candidates from the highest-priority source available.
     best_rank = max(_source_rank(d.source_type) for d in candidates)
     top = [d for d in candidates if _source_rank(d.source_type) == best_rank]
 
-    # Sắp xếp theo period_end (ngày dữ liệu có hiệu lực), retrieved_at làm tie-break
+    # Within that source tier, sort by period_end (most recent first); retrieved_at breaks ties.
     top.sort(
         key=lambda d: (d.period_end or date.min, d.retrieved_at),
         reverse=criteria.pick_latest,
     )
     chosen = top[0]
 
-    reason_parts = [f"nguồn {_SOURCE_LABELS.get(chosen.source_type, chosen.source_type.value)}"]
+    reason_parts = [f"source={_SOURCE_LABELS.get(chosen.source_type, chosen.source_type.value)}"]
     skipped = len(candidates) - len(top)
     if skipped > 0:
-        reason_parts.append(f"bỏ qua {skipped} bản ghi từ nguồn thấp hơn")
+        reason_parts.append(f"skipped {skipped} record(s) from lower-priority source(s)")
     if chosen.period_end:
         reason_parts.append(f"period_end={chosen.period_end.isoformat()}")
     else:
-        reason_parts.append("period_end không rõ")
+        reason_parts.append("period_end unknown")
 
     return SelectionResult(chosen, "; ".join(reason_parts))
 

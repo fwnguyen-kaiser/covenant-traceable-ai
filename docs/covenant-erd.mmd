@@ -1,0 +1,222 @@
+erDiagram
+  USER ||--o{ CASE : owns
+  USER ||--o{ CASE_ASSIGNMENT : "assigned as analyst"
+  CASE ||--o{ CASE_ASSIGNMENT : has
+  USER ||--o{ AUDIT_LOG : acts
+  USER ||--o{ ANALYST_NOTE : writes
+  CASE ||--o{ INTERVIEW_MESSAGE : has
+  CASE ||--o{ COMPANY_PROFILE : versions
+  CASE ||--o{ ANALYSIS_RUN : has
+  CASE ||--o{ ANALYST_NOTE : has
+  COMPANY_PROFILE ||--o{ OWNER_OBJECTIVE : includes
+  COMPANY_PROFILE ||--o{ ANALYSIS_RUN : "snapshot for"
+  METHODOLOGY_VERSION ||--o{ ANALYSIS_RUN : governs
+  RUBRIC_VERSION ||--o{ ANALYSIS_RUN : "scored with"
+  RUBRIC_VERSION ||--o{ CRITERION : contains
+  ANALYSIS_RUN ||--o{ PEER_CANDIDATE : proposes
+  ANALYSIS_RUN ||--o{ ASSUMPTION : uses
+  ANALYSIS_RUN ||--o{ FINANCIAL_DATAPOINT : collects
+  ANALYSIS_RUN ||--o| VALUATION_RESULT : produces
+  ANALYSIS_RUN ||--o{ STRATEGIC_ALTERNATIVE : evaluates
+  ANALYSIS_RUN ||--o{ INFORMATION_GAP : has
+  ANALYSIS_RUN ||--o{ REGULATORY_FLAG : raises
+  ANALYSIS_RUN ||--o| REPORT : produces
+  ANALYSIS_RUN |o--o{ ANALYST_NOTE : "about"
+  PEER_CANDIDATE |o--o{ FINANCIAL_DATAPOINT : describes
+  DATA_SOURCE ||--o{ FINANCIAL_DATAPOINT : supplies
+  DATA_SNAPSHOT ||--o{ FINANCIAL_DATAPOINT : backs
+  STRATEGIC_ALTERNATIVE ||--o{ ALTERNATIVE_SCORE : scored
+  CRITERION ||--o{ ALTERNATIVE_SCORE : "scored on"
+  REPORT ||--o{ REPORT_SECTION : contains
+
+  USER {
+    uuid id PK
+    string email
+    string password_hash
+    string role "admin | analyst | user"
+    timestamp created_at
+  }
+  CASE {
+    uuid id PK
+    uuid owner_id FK
+    string company_name
+    string status "draft | interviewed | peers_approved | assumptions_approved | valued | alternatives_evaluated | reported | closed"
+    timestamp created_at
+    timestamp updated_at
+  }
+  CASE_ASSIGNMENT {
+    uuid id PK
+    uuid case_id FK
+    uuid analyst_id FK
+    timestamp assigned_at
+  }
+  INTERVIEW_MESSAGE {
+    uuid id PK
+    uuid case_id FK
+    int seq
+    string role "assistant | user"
+    text content
+  }
+  COMPANY_PROFILE {
+    uuid id PK
+    uuid case_id FK
+    int version
+    string industry
+    string geography
+    decimal revenue
+    decimal ebitda
+    json extra
+  }
+  OWNER_OBJECTIVE {
+    uuid id PK
+    uuid profile_id FK
+    string key "liquidity | control | timeline | risk_tolerance"
+    string value
+    decimal priority_weight
+  }
+  METHODOLOGY_VERSION {
+    uuid id PK
+    string version
+    text description
+    date effective_from
+  }
+  RUBRIC_VERSION {
+    uuid id PK
+    string version
+    json entries "pathway x criterion scores"
+    date effective_from
+  }
+  CRITERION {
+    uuid id PK
+    uuid rubric_id FK
+    string name
+    text description
+  }
+  ANALYSIS_RUN {
+    uuid id PK
+    uuid case_id FK
+    uuid profile_id FK
+    uuid methodology_id FK
+    uuid rubric_id FK
+    string status "running | awaiting_peer_approval | awaiting_assumption_approval | done | failed"
+    string ai_run_id
+    timestamp started_at
+    timestamp finished_at
+  }
+  PEER_CANDIDATE {
+    uuid id PK
+    uuid run_id FK
+    string ticker
+    string cik
+    string rationale
+    string status "proposed | approved | rejected"
+    uuid decided_by FK
+    decimal ev_ebitda
+    boolean in_range
+  }
+  DATA_SOURCE {
+    uuid id PK
+    string name
+    string type "user_provided | sec_filing | market_data"
+    string base_url
+    text notes
+  }
+  DATA_SNAPSHOT {
+    uuid id PK
+    string payload_ref
+    string content_hash
+    timestamp retrieved_at
+  }
+  FINANCIAL_DATAPOINT {
+    uuid id PK
+    uuid run_id FK
+    uuid peer_id FK "null = target company"
+    uuid source_id FK
+    uuid snapshot_id FK
+    string metric
+    decimal value
+    string currency
+    date period_end
+    string source_ref "accession no. or field"
+    string source_url
+    timestamp retrieved_at
+  }
+  ASSUMPTION {
+    uuid id PK
+    uuid run_id FK
+    string key
+    string value
+    string origin "default | ai_proposed | user_set"
+    uuid approved_by FK
+    timestamp approved_at
+  }
+  VALUATION_RESULT {
+    uuid id PK
+    uuid run_id FK
+    decimal ev_low
+    decimal ev_mid
+    decimal ev_high
+    text limitations
+  }
+  STRATEGIC_ALTERNATIVE {
+    uuid id PK
+    uuid run_id FK
+    string pathway "strategic_sale | sponsor_sale | mbo | minority | hold_prepare"
+    boolean eligible
+    text eligibility_note
+    decimal total_score
+    int rank
+    text rationale
+  }
+  ALTERNATIVE_SCORE {
+    uuid id PK
+    uuid alternative_id FK
+    uuid criterion_id FK
+    decimal score
+    decimal weight
+    text rationale
+  }
+  INFORMATION_GAP {
+    uuid id PK
+    uuid run_id FK
+    string field
+    string impact
+    string resolution "requested | qualified | resolved"
+  }
+  REGULATORY_FLAG {
+    uuid id PK
+    uuid run_id FK
+    string topic
+    text note "preliminary flag, not legal advice"
+  }
+  REPORT {
+    uuid id PK
+    uuid run_id FK
+    string status "draft | validated | final"
+    timestamp generated_at
+  }
+  REPORT_SECTION {
+    uuid id PK
+    uuid report_id FK
+    string section_key
+    int seq
+    text content_md
+  }
+  ANALYST_NOTE {
+    uuid id PK
+    uuid case_id FK
+    uuid run_id FK
+    uuid author_id FK
+    text note
+    text override_justification
+    timestamp created_at
+  }
+  AUDIT_LOG {
+    uuid id PK
+    uuid actor_id FK
+    string action
+    string entity_type
+    uuid entity_id
+    json detail
+    timestamp created_at
+  }

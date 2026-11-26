@@ -77,12 +77,62 @@ def test_business_profile_missing_dimensions():
 def test_business_overlap_identical_is_one():
     p = BusinessProfile(
         ticker="A", sector="IT", sub_industry="Software",
-        products_services=("crm",), customers_end_markets=("smb",),
+        products_services=("crm",), customers=("smb",), end_markets=("retail",),
         distribution_channels=("direct",), geography=("us",),
     )
     q = BusinessProfile(
         ticker="B", sector="IT", sub_industry="Software",
-        products_services=("crm",), customers_end_markets=("smb",),
+        products_services=("crm",), customers=("smb",), end_markets=("retail",),
         distribution_channels=("direct",), geography=("us",),
     )
     assert all(v == 1.0 for v in business_overlap(p, q).values())
+
+
+def test_gross_profit_in_size_and_split_customers_end_markets():
+    size_names = {m.name for m in MetricsRegistry.list_by_category(MetricCategory.SIZE)}
+    assert "gross_profit" in size_names
+
+    a = BusinessProfile(
+        ticker="A", sector="IT", sub_industry="Software",
+        customers=("enterprises",), end_markets=("healthcare",),
+    )
+    b = BusinessProfile(
+        ticker="B", sector="IT", sub_industry="Software",
+        customers=("enterprises",), end_markets=("finance",),
+    )
+    scores = business_overlap(a, b)
+    assert scores[BusinessDimension.CUSTOMERS] == 1.0
+    assert scores[BusinessDimension.END_MARKETS] == 0.0
+
+
+def test_business_overlap_omits_empty_or_one_sided_dimensions():
+    """Unpopulated or one-sided axes must be omitted so they never dilute scores."""
+    a = BusinessProfile(
+        ticker="TARGET",
+        sector="application_software",
+        sub_industry="vertical_saas",
+        customers=("b2b",),
+    )
+    b = BusinessProfile(
+        ticker="PEER",
+        sector="application_software",
+        sub_industry="vertical_saas",
+        customers=("b2b",),
+        end_markets=("healthcare",),  # missing on target -> omitted
+    )
+    scores = business_overlap(a, b)
+    assert scores == {
+        BusinessDimension.SECTOR: 1.0,
+        BusinessDimension.CUSTOMERS: 1.0,
+    }
+
+    c = BusinessProfile(
+        ticker="NO_SUB",
+        sector="application_software",
+        sub_industry="",
+        customers=("b2b",),
+    )
+    # One-sided sub_industry must omit SECTOR instead of scoring 0.0
+    assert business_overlap(a, c) == {BusinessDimension.CUSTOMERS: 1.0}
+    # Both-empty sub_industry must also omit SECTOR instead of falsely scoring 1.0
+    assert business_overlap(c, c) == {BusinessDimension.CUSTOMERS: 1.0}

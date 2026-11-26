@@ -4,6 +4,7 @@ venv/
 env/
 .env
 .env.*
+!.env.example
 
 # Python cache
 __pycache__/
@@ -30,6 +31,13 @@ htmlcov/
 # VS Code 
 # .vscode/
 
-# docs
-docs/
+# Large reference source and local Markdown notes/plans (kept untracked on disk).
 *.md
+!README.md
+docs/IB.pdf
+
+# Downloaded SEC payload cache
+ai/src/covenant_ai/.edgar_cache/
+
+# Local historical closing-price input; the header template stays tracked.
+ai/market_price_snapshots.csv

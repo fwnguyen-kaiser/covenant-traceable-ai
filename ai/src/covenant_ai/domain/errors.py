@@ -1,8 +1,9 @@
 class ValuationError(ValueError):
-    """Base cho lỗi nghiệp vụ của valuation."""
+    """Base class for domain-level valuation errors."""
 
 class InsufficientPeersError(ValuationError): ...
 class PeriodMismatchError(ValuationError): ...
+class NonPositiveTargetEbitdaError(ValuationError): ...
 
 class MissingFieldError(ValueError):
     def __init__(self, ticker: str, missing: list[str]):

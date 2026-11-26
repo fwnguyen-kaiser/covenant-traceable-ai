@@ -80,14 +80,14 @@ def test_ebit_ebitda_are_derived_in_registry():
 # --- bridge ------------------------------------------------------------------
 
 def test_bridge_computes_ebitda_from_raw():
-    peer, used = build_peer_financials(full_ledger(), "NKE")
+    peer, used = build_peer_financials(full_ledger(), "NKE", period="LTM")
     assert peer.ebitda == D(4450)
     assert peer.ebitda_period == "LTM"
 
 
 def test_bridge_provenance_includes_all_ebitda_inputs():
     ledger = full_ledger()
-    peer, used = build_peer_financials(ledger, "NKE")
+    peer, used = build_peer_financials(ledger, "NKE", period="LTM")
     by_metric = {d.metric: d.id for d in ledger}
     for m in EBITDA_INPUTS:
         assert by_metric[m] in used
@@ -96,7 +96,7 @@ def test_bridge_provenance_includes_all_ebitda_inputs():
 def test_bridge_missing_da_raises():
     ledger = [d for d in full_ledger() if d.metric != "depreciation_amortization"]
     with pytest.raises(MissingFieldError):
-        build_peer_financials(ledger, "NKE")
+        build_peer_financials(ledger, "NKE", period="LTM")
 
 
 def test_bridge_requires_same_period():
@@ -106,7 +106,7 @@ def test_bridge_requires_same_period():
 
 
 def test_bridge_optional_nci_defaults_to_zero():
-    peer, _ = build_peer_financials(full_ledger(), "NKE")
+    peer, _ = build_peer_financials(full_ledger(), "NKE", period="LTM")
     assert peer.non_controlling_interests == D(0)
 
 
