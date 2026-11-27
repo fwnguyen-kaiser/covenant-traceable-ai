@@ -1,7 +1,7 @@
-"""Tests cho EBITDA bottom-up + cờ NCI.
+"""Tests for bottom-up GAAP EBITDA bridge + NCI materiality flags.
 
-`ebitda_inputs()` là helper để thay cho fixture cũ vốn nạp thẳng datapoint
-"ebitda" vào ledger: giờ phải nạp 4 dòng thô.
+`ebitda_inputs()` builds the 4 raw income-statement datapoints instead of seeding
+a pre-computed "ebitda" row into the ledger.
 """
 
 from datetime import datetime
@@ -39,7 +39,7 @@ def dp(ticker, metric, value, period="LTM", source=SourceType.SEC_FILING):
 
 
 def ebitda_inputs(ticker, income_cont, interest_net, tax, da, period="LTM"):
-    """4 dòng thô để dựng EBITDA cho một peer."""
+    """Return the 4 raw GAAP lines used to derive EBITDA for one peer."""
     return [
         dp(ticker, "income_continuing_ops", income_cont, period),
         dp(ticker, "interest_expense_net", interest_net, period),
@@ -49,7 +49,7 @@ def ebitda_inputs(ticker, income_cont, interest_net, tax, da, period="LTM"):
 
 
 def full_ledger(ticker="NKE", **over):
-    rows = ebitda_inputs(ticker, 3108, -50, 792, 600)  # D&A 600 là số minh họa
+    rows = ebitda_inputs(ticker, 3108, -50, 792, 600)  # Illustrative D&A of 600
     rows += [
         dp(ticker, "market_cap", over.get("market_cap", 100_000)),
         dp(ticker, "total_debt", over.get("total_debt", 8_000)),
@@ -60,7 +60,7 @@ def full_ledger(ticker="NKE", **over):
     return rows
 
 
-# --- công thức ---------------------------------------------------------------
+# --- Formulas ----------------------------------------------------------------
 
 def test_nike_ebit_matches_10k_reconciliation():
     # Nike FY2026: NI 3,108; interest (income) expense net (50); tax 792 -> EBIT 3,850
@@ -110,7 +110,7 @@ def test_bridge_optional_nci_defaults_to_zero():
     assert peer.non_controlling_interests == D(0)
 
 
-# --- cờ NCI ------------------------------------------------------------------
+# --- NCI materiality flag ----------------------------------------------------
 
 def peer_with(nci, market_cap=100_000, debt=0, cash=0):
     return PeerFinancials(

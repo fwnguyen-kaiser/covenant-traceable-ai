@@ -1,0 +1,37 @@
+#!/bin/sh
+# Block commit messages written in Vietnamese.
+set -eu
+
+MSG_FILE="${1:?commit message path required}"
+TOP="$(git rev-parse --show-toplevel)"
+
+PY=""
+for cand in \
+  "$TOP/ai/.venv/Scripts/python.exe" \
+  "$TOP/ai/.venv/bin/python" \
+  "$(command -v python3 2>/dev/null || true)" \
+  "$(command -v python 2>/dev/null || true)"; do
+  if [ -n "$cand" ] && "$cand" -c "import sys" >/dev/null 2>&1; then
+    PY="$cand"
+    break
+  fi
+done
+
+if [ -n "$PY" ]; then
+  "$PY" - "$MSG_FILE" <<'PY_EOF'
+import re
+import sys
+
+VN_RE = re.compile(
+    r"[àáảãạăằắẳẵặâầấẩẫậđèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ"
+    r"ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬĐÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴ]"
+)
+msg = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+for line in msg.splitlines():
+    if line.lstrip().startswith("#"):
+        continue
+    if VN_RE.search(line):
+        sys.stderr.write(f"COMMIT BLOCKED: Write commit messages in English only: {line.strip()[:120]}\n")
+        sys.exit(1)
+PY_EOF
+fi
