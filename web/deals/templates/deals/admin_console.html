@@ -1,0 +1,99 @@
+{% extends "deals/base.html" %}
+{% block title %}Admin Console · Project Covenant{% endblock %}
+{% block content %}
+<div id="admin-error" class="error-box" style="display:none;"></div>
+<div class="row">
+  <div class="col">
+    <div class="card">
+      <h3>Users &amp; Account Governance</h3>
+      <form id="admin-create-user" style="margin-bottom:14px;">
+        <label>Email</label><input id="adm_email" type="email" required>
+        <label>Initial Password (min 8 chars)</label><input id="adm_password" type="password" required>
+        <label>Role</label>
+        <select id="adm_role">
+          <option value="analyst">analyst</option>
+          <option value="reviewer">reviewer</option>
+          <option value="admin">admin</option>
+        </select>
+        <button type="submit" style="margin-top:10px;">Provision User</button>
+      </form>
+      <table>
+        <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>report.release</th><th>Actions</th></tr></thead>
+        <tbody>
+          {% for u in users %}
+          <tr>
+            <td>{{ u.email }}</td>
+            <td>{{ u.role }}</td>
+            <td>{% if u.is_active %}<span class="badge badge-ok">active</span>{% else %}<span class="badge badge-danger">locked</span>{% endif %}</td>
+            <td>{% if u.can_release_report %}<span class="badge badge-ok">granted</span>{% else %}none{% endif %}</td>
+            <td>
+              <button class="btn-secondary" onclick="CovenantApp.toggleUserActive('{{ u.user_id }}', {{ u.is_active|yesno:'false,true' }})">
+                {% if u.is_active %}Lock{% else %}Unlock{% endif %}
+              </button>
+              <button class="btn-warn" onclick="CovenantApp.toggleReleasePerm('{{ u.user_id }}', {{ u.can_release_report|yesno:'false,true' }})">
+                {% if u.can_release_report %}Revoke Release{% else %}Grant Release{% endif %}
+              </button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="col">
+    <div class="card">
+      <h3>Case Ownership &amp; Assignments</h3>
+      <p style="font-size:13px;color:#5a677d;">Administrative metadata only; reading deal financials requires explicit assignment.</p>
+      <table>
+        <thead><tr><th>Company</th><th>Owner</th><th>Members</th><th>Assign Member</th></tr></thead>
+        <tbody>
+          {% for c in admin_cases %}
+          <tr>
+            <td>{{ c.company_name }}<br><span class="badge">{{ c.status }}</span></td>
+            <td>{{ c.owner_email|default:"UNOWNED" }}</td>
+            <td>
+              {% for m in c.members %}
+                <div>{{ m.email }} ({{ m.role }})</div>
+              {% empty %}
+                <span style="color:#5a677d;">None</span>
+              {% endfor %}
+            </td>
+            <td>
+              <select id="assign-user-{{ c.case_id }}">
+                {% for u in users %}<option value="{{ u.user_id }}">{{ u.email }}</option>{% endfor %}
+              </select>
+              <select id="assign-role-{{ c.case_id }}" style="margin-top:4px;">
+                <option value="analyst">analyst</option>
+                <option value="reviewer">reviewer</option>
+                <option value="release_admin">release_admin</option>
+              </select>
+              <button style="margin-top:6px;" onclick="CovenantApp.assignMember('{{ c.case_id }}')">Assign</button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<div class="card">
+  <h3>Recent Audit Events</h3>
+  <table>
+    <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Detail</th></tr></thead>
+    <tbody>
+      {% for log in audit_logs %}
+      <tr>
+        <td>{{ log.created_at }}</td>
+        <td>{{ log.actor_email|default:"system" }}</td>
+        <td><code>{{ log.action }}</code></td>
+        <td>{{ log.entity_type }} {{ log.entity_id|default:"" }}</td>
+        <td><code>{{ log.detail }}</code></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>CovenantApp.initAdminConsole();</script>
+{% endblock %}

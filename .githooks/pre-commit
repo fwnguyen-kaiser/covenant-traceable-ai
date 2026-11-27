@@ -28,7 +28,7 @@ VN_RE = re.compile(
     r"ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬĐÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴ]"
 )
 ALLOW_MARKER = "# i18n-currency-fixture"
-TEXT_EXTS = (".py", ".md", ".sql", ".toml", ".yml", ".yaml", ".json", ".mmd", ".sh", ".cfg", ".ini", ".txt")
+TEXT_EXTS = (".py", ".md", ".sql", ".toml", ".yml", ".yaml", ".json", ".mmd", ".sh", ".cfg", ".ini", ".txt", ".html", ".css", ".js")
 
 staged_files = subprocess.check_output(
     ["git", "diff", "--cached", "--name-only", "--diff-filter=AMCR"],

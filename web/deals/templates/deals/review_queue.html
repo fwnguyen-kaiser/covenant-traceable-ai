@@ -1,0 +1,69 @@
+{% extends "deals/base.html" %}
+{% block title %}Review &amp; Release Queue · Project Covenant{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Assigned Reviewer Queue</h2>
+  <div id="review-error" class="error-box" style="display:none;"></div>
+  <table>
+    <thead><tr><th>Case</th><th>Run / Ver</th><th>Audit</th><th>Status</th><th>SHA-256 Digest</th><th>Actions</th></tr></thead>
+    <tbody>
+      {% for item in review_items %}
+      <tr>
+        <td><a href="/cases/{{ item.case_id }}/?run_id={{ item.run_id }}">{{ item.company_name }}</a></td>
+        <td>{{ item.run_id|slice:":8" }} (v{{ item.profile_version }})</td>
+        <td><span class="badge {% if item.audit_verdict == 'pass' %}badge-ok{% elif item.audit_verdict == 'warn' %}badge-warn{% else %}badge-danger{% endif %}">{{ item.audit_verdict|upper }}</span></td>
+        <td>{{ item.review_status }}</td>
+        <td><code style="font-size:11px;">{{ item.digest|slice:":16" }}...</code></td>
+        <td>
+          {% if item.review_status == "submitted" %}
+            <input type="text" id="rev-comment-{{ item.run_id }}" placeholder="Review comment / change reason" style="margin-bottom:6px;">
+            <button onclick="CovenantApp.reviewAction('{{ item.run_id }}', '{{ item.digest }}', true)">Mark Reviewed</button>
+            <button class="btn-warn" onclick="CovenantApp.reviewAction('{{ item.run_id }}', '{{ item.digest }}', false)">Request Changes</button>
+          {% else %}
+            <a class="btn btn-secondary" href="/api/runs/{{ item.run_id }}/exports/xlsx">Download XLSX</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="6" style="color:#5a677d;">No reports assigned for review.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if actor.can_release_report %}
+<div class="card">
+  <h2>Release Authorization Queue (<code>report.release</code>)</h2>
+  <p style="font-size:13px;color:#5a677d;">Releasing marks the exact reviewed digest approved for local client export without sending externally.</p>
+  <div id="release-error" class="error-box" style="display:none;"></div>
+  <table>
+    <thead><tr><th>Case</th><th>Run / Ver</th><th>Audit</th><th>Status</th><th>SHA-256 Digest</th><th>Actions</th></tr></thead>
+    <tbody>
+      {% for item in release_items %}
+      <tr>
+        <td><a href="/cases/{{ item.case_id }}/?run_id={{ item.run_id }}">{{ item.company_name }}</a></td>
+        <td>{{ item.run_id|slice:":8" }} (v{{ item.profile_version }})</td>
+        <td><span class="badge {% if item.audit_verdict == 'pass' %}badge-ok{% else %}badge-warn{% endif %}">{{ item.audit_verdict|upper }}</span></td>
+        <td>{{ item.review_status }}</td>
+        <td><code style="font-size:11px;">{{ item.digest|slice:":16" }}...</code></td>
+        <td>
+          {% if item.review_status == "reviewed" %}
+            {% if item.audit_verdict == "warn" %}
+              <label style="display:inline-flex;align-items:center;gap:6px;margin:0 8px 6px 0;">
+                <input type="checkbox" id="ack-warn-{{ item.run_id }}" style="width:auto;"> Acknowledge WARN findings
+              </label>
+            {% endif %}
+            <button onclick="CovenantApp.releaseReport('{{ item.run_id }}', '{{ item.digest }}', '{{ item.audit_verdict }}')">Release Report</button>
+          {% else %}
+            <a class="btn btn-secondary" href="/api/runs/{{ item.run_id }}/exports/xlsx">Download XLSX</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="6" style="color:#5a677d;">No reviewed reports waiting for release.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

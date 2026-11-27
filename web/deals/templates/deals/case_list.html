@@ -1,0 +1,86 @@
+{% extends "deals/base.html" %}
+{% block title %}Cases · Project Covenant{% endblock %}
+{% block content %}
+<div class="row">
+  <div class="col" style="flex:2 1 520px;">
+    <div class="card">
+      <h2>Deal Cases</h2>
+      <form method="get" action="/" class="row" style="align-items:end;margin-bottom:14px;">
+        <div class="col">
+          <label for="id_q">Search company</label>
+          <input id="id_q" name="q" value="{{ q }}" placeholder="Company name...">
+        </div>
+        <div style="width:160px;">
+          <label for="id_status">Status</label>
+          <select id="id_status" name="status">
+            <option value="active" {% if status_filter == "active" %}selected{% endif %}>Active</option>
+            <option value="archived" {% if status_filter == "archived" %}selected{% endif %}>Archived</option>
+            <option value="all" {% if status_filter == "all" %}selected{% endif %}>All</option>
+          </select>
+        </div>
+        <div>
+          <button type="submit" class="btn-secondary">Filter</button>
+        </div>
+      </form>
+      <table>
+        <thead>
+          <tr><th>Company</th><th>Status</th><th>Mode</th><th>Updated</th><th>Action</th></tr>
+        </thead>
+        <tbody>
+          {% for c in cases %}
+          <tr>
+            <td><strong>{{ c.company_name }}</strong></td>
+            <td><span class="badge {% if c.status == 'archived' %}badge-warn{% else %}badge-ok{% endif %}">{{ c.status }}</span></td>
+            <td>{{ c.management_mode }}</td>
+            <td>{{ c.updated_at }}</td>
+            <td><a href="/cases/{{ c.case_id }}/">Open</a></td>
+          </tr>
+          {% empty %}
+          <tr><td colspan="5" style="color:#5a677d;">No cases assigned to your account match this filter.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% if actor.role == "analyst" %}
+  <div class="col">
+    <div class="card">
+      <h3>New Draft Case</h3>
+      <div id="create-case-error" class="error-box" style="display:none;"></div>
+      <form id="create-case-form">
+        <label for="new_company_name">Company Name</label>
+        <input id="new_company_name" required placeholder="Acme Manufacturing LLC">
+        <label for="new_industry">Initial Industry (optional for draft)</label>
+        <select id="new_industry">
+          <option value="">-- Leave draft without v1 profile --</option>
+          {% for slug, label in industries %}
+            <option value="{{ slug }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+        <label for="new_ebitda_period">EBITDA Period</label>
+        <select id="new_ebitda_period">
+          <option value="FY">FY</option>
+          <option value="LTM">LTM</option>
+        </select>
+        <label for="new_ebitda">Target EBITDA (USD, decimal string)</label>
+        <input id="new_ebitda" placeholder="4800000">
+        <label for="new_revenue">Revenue (USD, optional)</label>
+        <input id="new_revenue" placeholder="32000000">
+        <label for="new_debt">Total Debt (USD, leave blank if unknown)</label>
+        <input id="new_debt" placeholder="">
+        <label for="new_cash">Cash (USD, leave blank if unknown)</label>
+        <input id="new_cash" placeholder="">
+        <label for="new_desc">Business Description</label>
+        <textarea id="new_desc" rows="2" placeholder="US industrial machinery manufacturer"></textarea>
+        <div style="margin-top:14px;">
+          <button type="submit">Create Case</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+{% block scripts %}
+<script>CovenantApp.initCaseList();</script>
+{% endblock %}

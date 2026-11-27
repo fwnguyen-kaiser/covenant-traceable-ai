@@ -1,0 +1,120 @@
+{% extends "deals/base.html" %}
+{% block title %}{{ case.company_name }} · Project Covenant{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="row" style="justify-content:space-between;align-items:center;">
+    <div>
+      <h2 style="margin:0;">{{ case.company_name }}</h2>
+      <span class="badge {% if case.status == 'archived' %}badge-warn{% else %}badge-ok{% endif %}">{{ case.status }}</span>
+      <span class="badge">{{ case.management_mode }}</span>
+      <span style="color:#5a677d;font-size:13px;">Case ID: {{ case.case_id }}</span>
+    </div>
+    <div>
+      {% if case.status == "active" %}
+        <button id="btn-archive-case" class="btn-secondary">Archive Case</button>
+      {% else %}
+        <button id="btn-restore-case" class="btn-warn">Restore Case</button>
+      {% endif %}
+      {% if not runs %}
+        <button id="btn-delete-case" class="btn-danger">Delete Draft Case</button>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div id="case-banner" class="error-box" style="display:none;"></div>
+
+<div class="row">
+  <div class="col">
+    <div class="card">
+      <h3>Company Profile Versions</h3>
+      <p style="font-size:13px;color:#5a677d;">Latest committed version: <strong>{% if latest_profile %}v{{ latest_profile.version }}{% else %}None (Draft){% endif %}</strong>. Leave debt or cash blank when unknown (distinct from <code>0</code>).</p>
+      <div id="profile-error" class="error-box" style="display:none;"></div>
+      <form id="profile-version-form">
+        <input type="hidden" id="prof_base_version" value="{% if latest_profile %}{{ latest_profile.version }}{% endif %}">
+        <label for="prof_company_name">Company Name</label>
+        <input id="prof_company_name" value="{% if latest_profile %}{{ latest_profile.profile.company_name }}{% else %}{{ case.company_name }}{% endif %}" required>
+        <label for="prof_industry">Industry</label>
+        <select id="prof_industry" required>
+          {% for slug, label in industries %}
+            <option value="{{ slug }}" {% if latest_profile and latest_profile.profile.industry == slug %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <label for="prof_geography">Geography</label>
+        <input id="prof_geography" value="{% if latest_profile %}{{ latest_profile.profile.geography }}{% else %}US{% endif %}" required>
+        <label for="prof_period">EBITDA Period Basis</label>
+        <select id="prof_period">
+          <option value="FY" {% if latest_profile and latest_profile.profile.ebitda_period == "FY" %}selected{% endif %}>FY</option>
+          <option value="LTM" {% if latest_profile and latest_profile.profile.ebitda_period == "LTM" %}selected{% endif %}>LTM</option>
+        </select>
+        <label for="prof_ebitda">Normalized / Reported EBITDA (USD)</label>
+        <input id="prof_ebitda" value="{% if latest_profile %}{{ latest_profile.profile.ebitda }}{% endif %}" required>
+        <label for="prof_revenue">Revenue (USD, blank if unknown)</label>
+        <input id="prof_revenue" value="{% if latest_profile and latest_profile.profile.revenue is not None %}{{ latest_profile.profile.revenue }}{% endif %}">
+        <label for="prof_debt">Total Debt (USD, blank if unknown, 0 if zero)</label>
+        <input id="prof_debt" value="{% if latest_profile and latest_profile.profile.total_debt is not None %}{{ latest_profile.profile.total_debt }}{% endif %}">
+        <label for="prof_cash">Cash (USD, blank if unknown, 0 if zero)</label>
+        <input id="prof_cash" value="{% if latest_profile and latest_profile.profile.cash is not None %}{{ latest_profile.profile.cash }}{% endif %}">
+        <label for="prof_desc">Business Description</label>
+        <textarea id="prof_desc" rows="2" required>{% if latest_profile %}{{ latest_profile.profile.business_description }}{% endif %}</textarea>
+        <div style="margin-top:12px;">
+          <button type="submit">Save New Profile Version</button>
+        </div>
+      </form>
+
+      <h4 style="margin-top:18px;">Version History</h4>
+      <table>
+        <thead><tr><th>Ver</th><th>Industry</th><th>Period</th><th>EBITDA</th><th>Debt / Cash</th></tr></thead>
+        <tbody>
+          {% for p in profiles %}
+          <tr>
+            <td>v{{ p.version }}</td>
+            <td>{{ p.profile.industry }}</td>
+            <td>{{ p.profile.ebitda_period }}</td>
+            <td>{{ p.profile.ebitda }}</td>
+            <td>{{ p.profile.total_debt|default_if_none:"unknown" }} / {{ p.profile.cash|default_if_none:"unknown" }}</td>
+          </tr>
+          {% empty %}
+          <tr><td colspan="5" style="color:#5a677d;">No profile versions saved yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="card">
+      <div class="row" style="justify-content:space-between;align-items:center;">
+        <h3 style="margin:0;">Chat with Agent</h3>
+        <button id="btn-start-run">Start Valuation Run</button>
+      </div>
+      <label for="run-selector">Analysis Run</label>
+      <select id="run-selector">
+        <option value="">-- Select or start a run --</option>
+        {% for r in runs %}
+          <option value="{{ r.run_id }}" {% if r.run_id == selected_run_id %}selected{% endif %}>
+            {{ r.run_id|slice:":8" }} · v{{ r.profile_version|default:"?" }} · {{ r.status }} ({{ r.review_status }})
+          </option>
+        {% endfor %}
+      </select>
+
+      <div id="chat-log" class="chat-log" style="margin-top:12px;"></div>
+      <div id="chat-error" class="error-box" style="display:none;"></div>
+      <div id="chat-prompt-box" style="display:none;"></div>
+    </div>
+
+    <div class="card" id="report-card" style="display:none;">
+      <h3>Frozen Draft &amp; Valuation Snapshot</h3>
+      <div id="report-meta" class="info-box"></div>
+      <div id="report-actions" style="margin-bottom:12px;"></div>
+      <div id="report-exports" style="margin-bottom:12px;"></div>
+      <pre id="report-md" class="report-md"></pre>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+CovenantApp.initCaseDetail("{{ case.case_id }}", "{{ selected_run_id }}");
+</script>
+{% endblock %}

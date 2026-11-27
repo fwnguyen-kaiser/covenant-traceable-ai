@@ -1,0 +1,21 @@
+{% extends "deals/base.html" %}
+{% block title %}Sign In · Project Covenant{% endblock %}
+{% block content %}
+<div class="card" style="max-width:460px;margin:48px auto;">
+  <h2>Sign In</h2>
+  <p style="color:#5a677d;font-size:14px;">Local authenticated session required to access deal workspaces.</p>
+  {% if error %}
+    <div class="error-box">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="/login/">
+    {% csrf_token %}
+    <label for="id_email">Email</label>
+    <input id="id_email" type="email" name="email" required autofocus>
+    <label for="id_password">Password</label>
+    <input id="id_password" type="password" name="password" required>
+    <div style="margin-top:16px;">
+      <button type="submit">Sign In</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

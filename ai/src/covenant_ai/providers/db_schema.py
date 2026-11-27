@@ -83,6 +83,117 @@ SCHEMA_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE valuation_results ADD COLUMN IF NOT EXISTS audit_verdict VARCHAR(20);",
     "ALTER TABLE valuation_results ADD COLUMN IF NOT EXISTS audit_findings JSONB DEFAULT '[]'::jsonb;",
     "ALTER TABLE valuation_results ADD COLUMN IF NOT EXISTS prompt_version VARCHAR(50);",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS can_release_report BOOLEAN NOT NULL DEFAULT FALSE;",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS credentials_verified BOOLEAN NOT NULL DEFAULT FALSE;",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS django_user_id BIGINT;",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_django_user_id ON users(django_user_id) WHERE django_user_id IS NOT NULL;",
+    "ALTER TABLE cases ADD COLUMN IF NOT EXISTS management_mode VARCHAR(20) NOT NULL DEFAULT 'legacy_cli';",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_cases_management_mode') THEN
+            ALTER TABLE cases
+                ADD CONSTRAINT chk_cases_management_mode
+                CHECK (management_mode IN ('legacy_cli', 'web_managed'));
+        END IF;
+    END $$;
+    """,
+    "ALTER TABLE cases ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;",
+    "ALTER TABLE cases ADD COLUMN IF NOT EXISTS archived_by UUID REFERENCES users(id) ON DELETE SET NULL;",
+    """
+    DO $$ DECLARE dup_case uuid; dup_ver int;
+    BEGIN
+        SELECT case_id, version INTO dup_case, dup_ver
+        FROM company_profiles
+        GROUP BY case_id, version
+        HAVING count(*) > 1
+        LIMIT 1;
+        IF FOUND THEN
+            RAISE EXCEPTION 'Duplicate profile version (case_id=%, version=%) detected; resolve before migration', dup_case, dup_ver;
+        END IF;
+    END $$;
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_unique_case_version ON company_profiles(case_id, version);",
+    """
+    CREATE TABLE IF NOT EXISTS case_memberships (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        case_id UUID NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role VARCHAR(30) NOT NULL CHECK (role IN ('analyst', 'reviewer', 'release_admin')),
+        assigned_by UUID REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (case_id, user_id)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_case_memberships_user ON case_memberships(user_id);",
+    "ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS review_status VARCHAR(30) NOT NULL DEFAULT 'draft';",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_runs_review_status') THEN
+            ALTER TABLE analysis_runs
+                ADD CONSTRAINT chk_runs_review_status
+                CHECK (review_status IN ('draft', 'submitted', 'reviewed', 'changes_requested', 'released'));
+        END IF;
+    END $$;
+    """,
+    "ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ;",
+    "ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS submitted_by UUID REFERENCES users(id) ON DELETE SET NULL;",
+    "ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;",
+    "ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS reviewed_by UUID REFERENCES users(id) ON DELETE SET NULL;",
+    "ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS review_comment TEXT;",
+    "ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ;",
+    "ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS released_by UUID REFERENCES users(id) ON DELETE SET NULL;",
+    "ALTER TABLE report_approvals ADD COLUMN IF NOT EXISTS actor_id UUID REFERENCES users(id) ON DELETE SET NULL;",
+    "ALTER TABLE report_approvals ADD COLUMN IF NOT EXISTS actor_type VARCHAR(20) NOT NULL DEFAULT 'windows_sid';",
+    """
+    CREATE TABLE IF NOT EXISTS report_review_events (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        run_id UUID NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+        stage VARCHAR(30) NOT NULL CHECK (stage IN ('submitted', 'reviewed', 'changes_requested', 'released')),
+        digest TEXT,
+        actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        actor_type VARCHAR(20) NOT NULL DEFAULT 'web_user',
+        actor_sid TEXT,
+        comment TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_review_events_run ON report_review_events(run_id, created_at);",
+    """
+    CREATE TABLE IF NOT EXISTS run_commands (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        run_id UUID NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+        thread_id VARCHAR(100) NOT NULL,
+        client_message_id VARCHAR(128) NOT NULL,
+        prompt_id VARCHAR(64),
+        command_hash TEXT NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'applied', 'failed')),
+        response_payload JSONB DEFAULT '{}'::jsonb,
+        error_detail TEXT,
+        actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (run_id, client_message_id)
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS chat_messages (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        run_id UUID NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+        seq_no INT NOT NULL,
+        sender_type VARCHAR(20) NOT NULL CHECK (sender_type IN ('agent', 'user', 'system')),
+        sender_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        message_type VARCHAR(30) NOT NULL,
+        prompt_id VARCHAR(64),
+        client_message_id VARCHAR(128),
+        body TEXT NOT NULL,
+        payload JSONB DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (run_id, seq_no)
+    );
+    """,
 )
 
 
