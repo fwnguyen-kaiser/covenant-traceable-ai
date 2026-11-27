@@ -12,15 +12,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
+from psycopg.conninfo import conninfo_to_dict
 
-from covenant_ai.domain.intake import create_company_profile_from_intake
 from covenant_ai.domain.intake_questions import Stage, questions
-from covenant_ai.domain.models import ExplainMode
+from covenant_ai.domain.models import ExplainMode, FinancialDatapoint, SourceType
+from datetime import UTC, datetime
 from covenant_ai.graph.checkpointer import open_postgres_checkpointer
 from covenant_ai.graph.workflow import create_valuation_graph
 from covenant_ai.llm.client import LLMClient, build_default_llm_client
@@ -38,6 +40,26 @@ def collect_interactive_intake() -> dict[str, Any]:
     answers: dict[str, Any] = {}
     print("\n=== Covenant AI — Target Company Intake ===\n")
     for q in questions(Stage.MVP):
+        if q.id == "one_off_items":
+            items = []
+            while description := input("One-off item description (Enter to finish): ").strip():
+                kind = input("Does this remove income or add back a cost? (income/cost): ").strip().lower()
+                if kind not in {"income", "cost"}:
+                    print("Enter income or cost. Please re-enter this item.")
+                    continue
+                from covenant_ai.domain.amounts import parse_amount
+                try:
+                    amount = parse_amount(input("Amount in USD, as a positive magnitude: "))
+                    if amount < 0:
+                        raise ValueError
+                except ValueError:
+                    print("Invalid USD amount. Please re-enter this item.")
+                    continue
+                items.append({"category": "non_recurring_income" if kind == "income" else "non_recurring_charges",
+                              "description": description, "amount": str(amount)})
+            if items:
+                answers["adjustment_items"] = items
+            continue
         if q.choices:
             print(f"Choices: {', '.join(q.choices)}")
         default_hint = f" [default: {q.default}]" if q.default else (" [required]" if q.required else " [optional, Enter to skip]")
@@ -67,9 +89,19 @@ def _prompt_hitl_decision(payload: dict[str, Any], auto_approve: bool) -> Any:
             print(f"Extracted so far: {json.dumps(draft)}")
         for q in payload.get("questions") or []:
             print(f"- {q}")
+        if payload.get("structured"):
+            print("Enter corrected fields as a JSON object, or the value of the single missing field.")
         resp = input("Enter clarification details (or type 'pause'): ").strip()
         if resp.lower() == "pause":
             raise PauseRequested()
+        if payload.get("structured"):
+            missing = payload.get("missing_fields") or []
+            if len(missing) == 1 and not resp.startswith("{"):
+                return {missing[0]: resp}
+            try:
+                return json.loads(resp, parse_float=Decimal)
+            except ValueError:
+                return resp
         return resp
 
     if action == "confirm_industry":
@@ -134,7 +166,12 @@ def _prompt_hitl_decision(payload: dict[str, Any], auto_approve: bool) -> Any:
         ).strip()
         if resp.lower() == "pause":
             raise PauseRequested()
-        return [s.strip().upper() for s in resp.split(",") if s.strip()] if resp else selected
+        tickers = [s.strip().upper() for s in resp.split(",") if s.strip()] if resp else selected
+        outside = set(tickers) - set(payload.get("candidate_tickers", tickers))
+        if len(tickers) >= payload.get("min_required", 3) and outside:
+            reasons = {t: input(f"Why include {t} outside the industry pool? ").strip() for t in sorted(outside)}
+            return {"approved_peers": tickers, "rationale": reasons}
+        return tickers
 
     if auto_approve:
         return None
@@ -142,38 +179,16 @@ def _prompt_hitl_decision(payload: dict[str, Any], auto_approve: bool) -> Any:
     return resp
 
 
-def _run_hitl_step(
-    app: Any,
-    config: dict[str, Any],
-    payload: dict[str, Any],
-    *,
-    auto_approve: bool,
-    thread_id: str,
-    repo: PostgresCaseRepository,
-    run_id: Any,
-) -> dict[str, Any] | None:
-    """Prompt for one HITL checkpoint, resume graph, and audit-log accepted inputs."""
-    try:
-        decision = _prompt_hitl_decision(payload, auto_approve)
-    except PauseRequested:
-        print(f"Paused cleanly. Resume anytime with: --resume {thread_id}")
-        return None
-
-    action = payload.get("action")
-    next_state = app.invoke(Command(resume=decision), config=config)
-    next_interrupts = next_state.get("__interrupt__") or []
-    next_payload = next_interrupts[0].value if next_interrupts else None
-    rejected = bool(
-        isinstance(next_payload, dict)
-        and next_payload.get("action") == action
-        and next_payload.get("error")
-    )
-    if not rejected and run_id is not None:
-        if action == "confirm_industry":
-            repo.append_audit_log("industry_confirmed", "analysis_runs", run_id, {"decision": decision})
-        elif action == "peer_review":
-            repo.append_audit_log("peers_reviewed", "analysis_runs", run_id, {"decision": decision})
-    return next_state
+def _export_packet(packet: dict, markdown: Path | None, json_path: Path | None) -> None:
+    status = packet["release_status"].upper()
+    banner = f"**{status}** · {packet['method_version']} · SHA-256 `{packet['digest']}`"
+    report = f"{banner}\n\n{packet['explanation']}"
+    if markdown:
+        markdown.write_text(report, encoding="utf-8")
+    if json_path:
+        json_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Thread {packet['thread_id']} · {status}")
+    print(report)
 
 
 def run_cli(
@@ -196,144 +211,143 @@ def run_cli(
     parser.add_argument("--pause-after-intake", action="store_true", help="Run intake, persist checkpoint, and exit at first HITL pause")
     parser.add_argument("--export-md", type=Path, help="Write Markdown explanation report to file")
     parser.add_argument("--export-json", type=Path, help="Write final valuation JSON payload to file")
+    parser.add_argument("--review-report", metavar="THREAD_ID", help="Open the frozen report and its approval digest")
+    parser.add_argument("--approve-digest", metavar="SHA256", help="Confirm the frozen report as the enrolled Windows reviewer")
     args = parser.parse_args(argv)
+    if args.approve_digest and not args.review_report:
+        parser.error("--approve-digest requires --review-report")
+    if args.review_report and any((args.input, args.prompt, args.resume, args.thread_id, args.auto_approve)):
+        parser.error("Review one frozen report separately from starting or resuming a run.")
 
+    if args.resume and (args.input or args.prompt or args.thread_id):
+        parser.error("A resume cannot also start a new case.")
+    if args.input and args.prompt:
+        parser.error("Choose one intake source.")
     db_url = normalize_db_url(args.db_url)
+    connection = conninfo_to_dict(db_url)
+    addresses = [connection.get("host"), connection.get("hostaddr")]
+    if connection.get("service") or not any(addresses) or any(
+        addr and addr.lower() not in {"localhost", "127.0.0.1", "::1"} for addr in addresses
+    ):
+        parser.error("Private case data requires a PostgreSQL server on this machine.")
     repo = PostgresCaseRepository(db_url=db_url)
+    if args.review_report:
+        packet = repo.review_report(args.review_report, args.approve_digest)
+        _export_packet(packet, args.export_md, args.export_json)
+        return 0
     provider = PostgresMarketDataProvider(db_url=db_url, allow_on_demand_yahoo=True)
     active_llm = llm_client if llm_client is not None else build_default_llm_client()
     default_mode = args.explain_mode or (
         ExplainMode.LLM_HYBRID.value if active_llm is not None else ExplainMode.DETERMINISTIC.value
     )
 
-    run_id = None
-    case_id = None
-    already_completed = False
-    synced_profile_sig: tuple[Any, ...] | None = None
-
-    def _profile_sig(prof: Any) -> tuple[Any, ...] | None:
-        if prof is None:
-            return None
-        sub = prof.business_profile.sub_industry if getattr(prof, "business_profile", None) else None
-        return (prof.industry, str(prof.ebitda), sub)
-
-    def _ensure_or_sync_case_and_run(st: dict[str, Any], tid: str) -> None:
-        nonlocal case_id, run_id, synced_profile_sig
-        prof = st.get("company_profile")
-        if prof is None:
-            return
-        sig = _profile_sig(prof)
-        if run_id is None:
-            case_id, profile_id = repo.create_case_and_profile(prof, st.get("intake_answers"))
-            run_id = repo.start_analysis_run(case_id, profile_id, thread_id=tid)
-            synced_profile_sig = sig
-        elif synced_profile_sig is not None and sig != synced_profile_sig and case_id is not None:
-            case_id, new_profile_id = repo.create_case_and_profile(
-                prof, st.get("intake_answers"), case_id=case_id
-            )
-            repo.update_run_profile(run_id, new_profile_id)
-            synced_profile_sig = sig
-
-    with open_postgres_checkpointer(db_url) as checkpointer:
-        app = create_valuation_graph(
-            provider,
-            checkpointer=checkpointer,
-            llm_client=active_llm,
-            default_explain_mode=default_mode,
-        )
-
+    thread_id = args.resume or args.thread_id or f"run-{uuid4().hex}"
+    config = {"configurable": {"thread_id": thread_id}}
+    run_id = case_id = None
+    with repo.thread_lock(thread_id), open_postgres_checkpointer(db_url) as checkpointer:
+        app = create_valuation_graph(provider, checkpointer=checkpointer,
+                                     llm_client=active_llm, default_explain_mode=default_mode)
+        snap = app.get_state(config)
+        run_row = repo.get_run_by_thread_id(thread_id)
         if args.resume:
-            thread_id = args.resume
-            config = {"configurable": {"thread_id": thread_id}}
-            run_row = repo.get_run_by_thread_id(thread_id)
-            if run_row is not None:
-                run_id, case_id, existing_status = run_row
-                already_completed = existing_status == "completed"
-            snap = app.get_state(config)
-            if not snap or not snap.values:
+            if not snap.created_at:
                 print(f"No checkpoint found for thread_id={thread_id!r}", file=sys.stderr)
                 return 1
+            if run_row:
+                run_id, case_id, status = run_row
+            terminal = bool(run_row and status != "running")
             state = dict(snap.values)
-            if run_id is not None:
-                synced_profile_sig = _profile_sig(state.get("company_profile"))
-            pending_interrupts = [
-                intr.value
-                for task in (snap.tasks or ())
-                for intr in getattr(task, "interrupts", ())
-            ]
-            if pending_interrupts:
-                already_completed = False
-                state = _run_hitl_step(
-                    app,
-                    config,
-                    pending_interrupts[0],
-                    auto_approve=args.auto_approve,
-                    thread_id=thread_id,
-                    repo=repo,
-                    run_id=run_id,
-                )
-                if state is None:
-                    return 0
-                _ensure_or_sync_case_and_run(state, thread_id)
-        elif args.prompt:
-            if active_llm is None:
-                print(
-                    "Natural-language --prompt mode requires GEMINI_API_KEY or an injected LLMClient.",
-                    file=sys.stderr,
-                )
-                return 1
-            thread_id = args.thread_id or f"run-{uuid4().hex[:12]}"
-            config = {"configurable": {"thread_id": thread_id}}
-            init_state: dict[str, Any] = {"raw_input": args.prompt}
-            if args.explain_mode:
-                init_state["explain_mode"] = args.explain_mode
-            state = app.invoke(init_state, config=config)
-            _ensure_or_sync_case_and_run(state, thread_id)
-            if run_id is not None:
-                print(f"Started case={case_id} run={run_id} thread_id={thread_id}")
-            if args.pause_after_intake and "__interrupt__" in state:
-                print(f"Paused cleanly after intake. Resume with: --resume {thread_id}")
-                return 0
+            if terminal and snap.next:
+                raise ValueError("Historical run and checkpoint disagree on completion. Manual review required.")
+            if not terminal and state.get("company_profile") and not state.get("integrity_version"):
+                profile = state["company_profile"]
+                answers = dict(state.get("intake_answers") or {})
+                updates = {}
+                for field in ("total_debt", "cash"):
+                    if getattr(profile, field) == 0 and answers.get(field) in (None, ""):
+                        if args.auto_approve:
+                            print(f"Legacy {field} needs confirmation. Resume interactively; Enter keeps EV only.")
+                            return 0
+                        while True:
+                            raw = input(f"Confirm target {field} in USD (0 if zero, Enter if unknown): ").strip()
+                            try:
+                                amount = Decimal(raw) if raw else None
+                                if amount is not None and (not amount.is_finite() or amount < 0):
+                                    raise ValueError
+                                break
+                            except ArithmeticError:
+                                print("Enter a nonnegative USD amount.")
+                            except ValueError:
+                                print("Enter a nonnegative USD amount.")
+                        updates[field] = amount
+                        answers[field] = str(amount) if amount is not None else None
+                profile = profile.model_copy(update=updates)
+                # Old ranking may depend on an invented zero. Re-run screening and peer review.
+                target_points = [d for d in state.get("ledger", [])
+                                 if not d.peer_ticker and d.metric not in {"cash", "total_debt", "revenue"}]
+                for metric in ("cash", "total_debt", "revenue"):
+                    amount = getattr(profile, metric)
+                    if amount is not None:
+                        target_points.append(FinancialDatapoint(
+                            metric=metric, value=amount, period=profile.ebitda_period, period_end=profile.period_end_date,
+                            source_type=SourceType.USER_PROVIDED, source_ref=f"Target intake field {metric}",
+                            retrieved_at=datetime.now(UTC),
+                        ))
+                change = {"company_profile": profile, "intake_answers": answers, "integrity_version": 2,
+                          "ledger": Overwrite(target_points),
+                          "failed_peers": {}, "disqualified_peers": [], "valuation": {}, "retry_count": 0,
+                          "peer_review_confirmed": False, "insufficient_peers": False}
+                app.update_state(config, change, as_node="confirm_industry" if state.get("industry_confirmed") else "intake")
+                snap = app.get_state(config)
+                state = dict(snap.values)
+            if not terminal:
+                pending = [i for task in snap.tasks for i in task.interrupts]
+                if pending:
+                    state["__interrupt__"] = pending
+                elif snap.next:
+                    state = app.invoke(None, config=config)
         else:
-            answers = (
-                json.loads(args.input.read_text(encoding="utf-8"))
-                if args.input
-                else collect_interactive_intake()
-            )
-            profile, _ = create_company_profile_from_intake(answers)
-            case_id, profile_id = repo.create_case_and_profile(profile, answers)
-            synced_profile_sig = _profile_sig(profile)
-            thread_id = args.thread_id or f"run-{uuid4().hex[:12]}"
-            run_id = repo.start_analysis_run(case_id, profile_id, thread_id=thread_id)
-            config = {"configurable": {"thread_id": thread_id}}
-            print(f"Started case={case_id} run={run_id} thread_id={thread_id}")
-            init_state = {"intake_answers": answers}
-            if args.explain_mode:
-                init_state["explain_mode"] = args.explain_mode
+            if snap.created_at or run_row:
+                print("This thread is already in use. Resume it or start a new thread.", file=sys.stderr)
+                return 1
+            if args.prompt and active_llm is None:
+                print("Free-text intake needs a local extraction client. Use local JSON or interactive intake.", file=sys.stderr)
+                return 1
+            if args.prompt:
+                init_state = {"raw_input": args.prompt}
+            else:
+                answers = (json.loads(args.input.read_text(encoding="utf-8"), parse_float=Decimal)
+                           if args.input else collect_interactive_intake())
+                init_state = {"intake_answers": answers}
+            init_state.update(integrity_version=2, explain_mode=default_mode)
             state = app.invoke(init_state, config=config)
-            if args.pause_after_intake and "__interrupt__" in state:
-                print(f"Paused cleanly after intake. Resume with: --resume {thread_id}")
-                return 0
+            terminal = False
 
-        while "__interrupt__" in state:
-            already_completed = False
+        while not terminal:
+            if state.get("company_profile") is not None:
+                case_id, run_id = repo.sync_profile(thread_id, state["company_profile"], state.get("intake_answers"))
+                repo.sync_decisions(run_id, state)
+            if "__interrupt__" not in state:
+                if app.get_state(config).next:
+                    raise RuntimeError("Cannot finalize while graph work remains.")
+                if run_id is None:
+                    raise RuntimeError("No persisted case for terminal checkpoint.")
+                repo.finish_analysis_run(run_id, state)
+                break
+            if not args.resume and args.pause_after_intake:
+                print(f"Paused after intake. Resume with: --resume {thread_id}")
+                return 0
             payload = state["__interrupt__"][0].value
-            state = _run_hitl_step(
-                app,
-                config,
-                payload,
-                auto_approve=args.auto_approve,
-                thread_id=thread_id,
-                repo=repo,
-                run_id=run_id,
-            )
-            if state is None:
+            try:
+                decision = _prompt_hitl_decision(payload, args.auto_approve)
+            except PauseRequested:
+                print(f"Paused. Resume with: --resume {thread_id}")
                 return 0
-            _ensure_or_sync_case_and_run(state, thread_id)
+            state = app.invoke(Command(resume=decision), config=config)
 
-    if run_id is not None and not already_completed:
-        repo.finish_analysis_run(run_id, state)
-
+    if run_id and state.get("valuation") and state.get("integrity_version") == 2:
+        _export_packet(repo.review_report(thread_id), args.export_md, args.export_json)
+        return 0
     explanation = state.get("explanation") or "Workflow completed without explanation."
     if args.export_md:
         args.export_md.write_text(explanation, encoding="utf-8")

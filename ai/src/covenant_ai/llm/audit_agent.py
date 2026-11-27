@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from covenant_ai.domain.models import AuditVerdict
-from covenant_ai.llm.client import LLMClient
+from covenant_ai.llm.client import LLMClient, require_local_client
 from covenant_ai.llm.fact_pack import FACT_PATTERN, LockedFactPack
 from covenant_ai.llm.prompts import AUDIT_SYSTEM_PROMPT
 from covenant_ai.llm.schemas import AuditFinding, SemanticAuditResponse
@@ -134,7 +134,7 @@ def _check_mandatory_disclosures(
     fact_pack: LockedFactPack,
 ) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
-    lower = rendered_md.lower()
+    lower = "\n".join(line for line in rendered_md.lower().splitlines() if not line.lstrip().startswith("#"))
     risks = set(fact_pack.required_risk_topics)
 
     if "customer_concentration" in risks:
@@ -167,8 +167,15 @@ def _check_mandatory_disclosures(
                 )
             )
 
+    for code, terms in {
+        "nci_material": ("nci", "non-controlling", "noncontrolling"),
+        "small_peer_count": ("small cohort", "small peer", "limited peer", "few peers", "thin cohort"),
+        "excluded_or_failed_peers": ("excluded", "failed", "omitted peer", "disqualified"),
+    }.items():
+        if code in risks and not any(term in lower for term in terms):
+            findings.append(AuditFinding(rule=f"missing_{code}", severity="fail", message=f"Disclose {code} in commentary."))
     if fact_pack.inconsistencies:
-        if not any(k in lower for k in ("inconsisten", "unverified", "mismatch", "caveat", "discrepanc")):
+        if not any(k in lower for k in ("inconsisten", "unverified", "mismatch", "discrepanc")):
             findings.append(
                 AuditFinding(
                     rule="missing_inconsistency_disclosure",
@@ -236,6 +243,7 @@ def audit_narrative(
             rendered_md,
         ])
         try:
+            require_local_client(client)
             sem = client.generate_structured(
                 prompt=prompt,
                 system_prompt=AUDIT_SYSTEM_PROMPT,
@@ -255,6 +263,9 @@ def audit_narrative(
                 )
             )
             return AuditVerdict.WARN, findings
+        if sem.verdict == AuditVerdict.WARN and not sem.issues:
+            findings.append(AuditFinding(rule="semantic_warn", severity="warn",
+                                         message="Semantic reviewer returned WARN without issue details."))
         for issue in sem.issues:
             findings.append(
                 AuditFinding(

@@ -19,6 +19,8 @@ T = TypeVar("T", bound=BaseModel)
 class FakeLLMClient:
     """Offline scriptable LLMClient tracking call metadata and 2-tier model resolution."""
 
+    local_only = True
+
     def __init__(
         self,
         responses: Mapping[str, Any] | None = None,

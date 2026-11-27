@@ -48,6 +48,10 @@ class ValuationState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     ledger: NotRequired[Annotated[list[FinancialDatapoint], operator.add]]
 
+    integrity_version: NotRequired[int]
+    review_decisions: NotRequired[list[dict[str, Any]]]
+    peer_review_rationale: NotRequired[dict[str, str]]
+
     # Target company & Intake
     intake_answers: NotRequired[dict[str, Any]]
     company_profile: NotRequired[CompanyProfile]

@@ -30,7 +30,8 @@ def with_raw_ebitda(data, da_ratio=Decimal("0.1")):
             income_tax_expense=Decimal(0),
             depreciation_amortization=da,
         )
-        out[ticker] = m
+        # Source fixture amounts are in ten millions of USD. Multiples stay unchanged.
+        out[ticker] = {key: value * Decimal("10000000") for key, value in m.items()}
     return out
 
 
@@ -174,7 +175,7 @@ def test_graph_user_adds_unknown_peer_recorded_in_failed_peers():
     app.invoke(Command(resume=Industry.APPLICATION_SOFTWARE.value), config=config)
 
     # User reviews and includes an unknown ticker "ZZZ" alongside valid peers ADBE, CRM, INTU
-    final = app.invoke(Command(resume=["ADBE", "CRM", "INTU", "ZZZ"]), config=config)
+    final = app.invoke(Command(resume={"approved_peers": ["ADBE", "CRM", "INTU", "ZZZ"], "rationale": {"ZZZ": "Similar end markets"}}), config=config)
 
     assert "__interrupt__" not in final
     assert "ZZZ" in final["failed_peers"]
@@ -436,6 +437,9 @@ def test_graph_preserves_provider_error_when_all_peers_fail():
     their provider error reason is preserved rather than masked by generic missing fields.
     """
     class FyOnlyProvider:
+        def is_verified_peer(self, ticker):
+            return True
+
         def get_peer_financials(self, ticker: str, period: str):
             raise ValueError(f"supports annual FY data only, not {period!r}")
 

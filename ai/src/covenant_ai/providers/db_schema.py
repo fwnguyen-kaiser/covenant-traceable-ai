@@ -14,6 +14,17 @@ import psycopg
 DEFAULT_DB_URL = "postgresql://covenant_user:covenant_secure_pass_2026@localhost:5432/covenant_ai"
 
 SCHEMA_MIGRATIONS: tuple[str, ...] = (
+    """DO $$ DECLARE duplicate_tid text;
+       BEGIN SELECT thread_id INTO duplicate_tid FROM analysis_runs WHERE thread_id IS NOT NULL
+       GROUP BY thread_id HAVING count(*) > 1 LIMIT 1;
+       IF FOUND THEN RAISE EXCEPTION 'Ambiguous historical thread %, resolve ownership before migration', duplicate_tid;
+       END IF; END $$;""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_unique_thread ON analysis_runs(thread_id) WHERE thread_id IS NOT NULL;",
+    "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS decision_index INT;",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_event ON audit_logs(entity_id,decision_index) WHERE decision_index IS NOT NULL;",
+    "CREATE TABLE IF NOT EXISTS report_approvals (run_id UUID PRIMARY KEY REFERENCES analysis_runs(id) ON DELETE CASCADE, digest TEXT NOT NULL, reviewer_sid TEXT NOT NULL, approved_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP);",
+    "ALTER TABLE financial_datapoints ADD COLUMN IF NOT EXISTS origin_id UUID;",
+    "ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS review_packet JSONB;",
     "ALTER TABLE peer_companies ADD COLUMN IF NOT EXISTS exchange VARCHAR(30);",
     "ALTER TABLE peer_companies ADD COLUMN IF NOT EXISTS ev_tier VARCHAR(30);",
     "ALTER TABLE peer_companies ADD COLUMN IF NOT EXISTS sub_industry VARCHAR(64);",
@@ -53,6 +64,19 @@ SCHEMA_MIGRATIONS: tuple[str, ...] = (
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_peer_candidates_run ON peer_candidates(run_id);",
+    "ALTER TABLE company_profiles ALTER COLUMN total_debt DROP DEFAULT;",
+    "ALTER TABLE company_profiles ALTER COLUMN cash DROP DEFAULT;",
+    "ALTER TABLE peer_companies ADD COLUMN IF NOT EXISTS baseline_id UUID;",
+    "ALTER TABLE peer_companies ADD COLUMN IF NOT EXISTS baseline_errors JSONB;",
+    "ALTER TABLE financial_datapoints ADD COLUMN IF NOT EXISTS baseline_id UUID;",
+    """DO $$ DECLARE c record; BEGIN
+        FOR c IN SELECT table_name, column_name FROM information_schema.columns
+            WHERE table_schema=current_schema() AND numeric_precision IS NOT NULL AND
+            ((table_name='company_profiles' AND column_name IN ('revenue','ebitda','total_debt','cash')) OR
+             (table_name='financial_datapoints' AND column_name='value') OR
+             (table_name='valuation_results' AND column_name IN ('ev_low','ev_mid','ev_high','equity_low','equity_mid','equity_high')))
+        LOOP EXECUTE format('ALTER TABLE %I ALTER COLUMN %I TYPE NUMERIC', c.table_name,c.column_name);
+        END LOOP; END $$;""",
     "ALTER TABLE cases ALTER COLUMN status SET DEFAULT 'active';",
     "ALTER TABLE valuation_results ADD COLUMN IF NOT EXISTS explanation_md TEXT;",
     "ALTER TABLE valuation_results ADD COLUMN IF NOT EXISTS narrative_md TEXT;",

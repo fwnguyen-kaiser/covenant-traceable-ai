@@ -35,6 +35,7 @@ def test_negative_revenue_raises_value_error():
     answers = {
         "company_name": "Invalid Rev Corp",
         "business_description": "Tech software",
+        "ebitda_period": "FY",
         "industry": Industry.APPLICATION_SOFTWARE.value,
         "geography": "US",
         "revenue": "-5000000",
@@ -48,6 +49,7 @@ def test_ebitda_greater_than_revenue_raises_value_error():
     answers = {
         "company_name": "Impossible Margins LLC",
         "business_description": "Tech software",
+        "ebitda_period": "FY",
         "industry": Industry.APPLICATION_SOFTWARE.value,
         "geography": "US",
         "revenue": "5000000",
@@ -61,6 +63,7 @@ def test_negative_debt_or_cash_raises_value_error():
     answers_bad_debt = {
         "company_name": "Negative Debt Inc",
         "business_description": "Tech software",
+        "ebitda_period": "FY",
         "industry": Industry.APPLICATION_SOFTWARE.value,
         "geography": "US",
         "revenue": "10000000",
@@ -73,6 +76,7 @@ def test_negative_debt_or_cash_raises_value_error():
     answers_bad_cash = {
         "company_name": "Negative Cash Inc",
         "business_description": "Tech software",
+        "ebitda_period": "FY",
         "industry": Industry.APPLICATION_SOFTWARE.value,
         "geography": "US",
         "revenue": "10000000",
@@ -238,9 +242,9 @@ def test_compute_and_quality_check_reject_nonpositive_ev_peer():
             peer_ticker=ticker,
         )
         return [
-            FinancialDatapoint(metric="market_cap", value=D("100"), **base),
+            FinancialDatapoint(metric="market_cap", value=D("1000000000"), **base),
             FinancialDatapoint(metric="total_debt", value=D("10"), **base),
-            FinancialDatapoint(metric="cash", value=D(cash_val), **base),
+            FinancialDatapoint(metric="cash", value=D(cash_val) * D("10000000"), **base),
             FinancialDatapoint(metric="income_continuing_ops", value=D("10"), **base),
             FinancialDatapoint(metric="interest_expense_net", value=D("2"), **base),
             FinancialDatapoint(metric="income_tax_expense", value=D("3"), **base),

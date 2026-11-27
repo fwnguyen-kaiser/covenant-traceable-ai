@@ -100,6 +100,15 @@ def is_non_trading_cover_date(
     return is_us_statutory_non_trading_day(cover_date)
 
 
+def cover_price_session(cover: date, sessions: set[date] | None = None) -> date | None:
+    """Resolve one exchange session independent of whether the ticker has a quote."""
+    for days in range(6):
+        candidate = cover - timedelta(days=days)
+        if not is_non_trading_cover_date(candidate, sessions):
+            return candidate
+    return None
+
+
 def parse_yahoo_chart_closes(
     raw: bytes,
     ticker: str,

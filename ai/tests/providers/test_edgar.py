@@ -283,6 +283,9 @@ def test_edgar_provider_cash_sti_not_double_counted(monkeypatch):
             },
         }
     }
+    monkeypatch.setattr(provider, "_get_submissions", lambda cik: {"filings": {"recent": {
+        "form": ["10-K", "10-Q"], "reportDate": ["2025-12-31", "2026-06-30"], "accessionNumber": ["01", "02"],
+    }}})
     monkeypatch.setattr(provider, "_get_company_facts", lambda cik: synthetic_facts)
     pts = {d.metric: d for d in provider.get_peer_financials("ADBE", period="FY")}
     assert pts["cash"].value == Decimal("500")
@@ -434,6 +437,9 @@ def test_edgar_provider_ltm_rejects_standalone_quarter_and_mixed_tags(monkeypatc
             },
         }
     }
+    monkeypatch.setattr(provider, "_get_submissions", lambda cik: {"filings": {"recent": {
+        "form": ["10-K", "10-Q"], "reportDate": ["2025-12-31", "2026-06-30"], "accessionNumber": ["01", "02"],
+    }}})
     monkeypatch.setattr(provider, "_get_company_facts", lambda cik: facts_with_standalone_and_ytd)
     ltm = {d.metric: d for d in provider.get_peer_financials("ADBE", period="LTM")}
     assert ltm["income_continuing_ops"].value == Decimal("1100")  # 1000 + 600 - 500, NOT 999999
@@ -531,6 +537,9 @@ def test_edgar_provider_restated_10qa_overrides_orig_accn_and_ltm_da_parity(monk
             },
         }
     }
+    monkeypatch.setattr(provider, "_get_submissions", lambda cik: {"filings": {"recent": {
+        "form": ["10-K", "10-Q"], "reportDate": ["2025-12-31", "2026-06-30"], "accessionNumber": ["01", "02"],
+    }}})
     monkeypatch.setattr(provider, "_get_company_facts", lambda cik: facts)
     ltm = {d.metric: d for d in provider.get_peer_financials("ADBE", period="LTM")}
     assert ltm["income_continuing_ops"].value == Decimal("1300")  # 1200 (10-K/A) + 600 - 500

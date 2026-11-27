@@ -31,7 +31,8 @@ def _with_raw_ebitda(data, da_ratio=Decimal("0.1")):
             income_tax_expense=Decimal(0),
             depreciation_amortization=da,
         )
-        out[ticker] = m
+        # Source fixture amounts are in ten millions of USD. Multiples stay unchanged.
+        out[ticker] = {key: value * Decimal("10000000") for key, value in m.items()}
     return out
 
 
@@ -275,4 +276,6 @@ def test_semantic_audit_exception_degrades_gracefully_with_warn_and_saves_valuat
     assert final["valuation"] is not None
     assert final["audit_verdict"] == AuditVerdict.WARN.value
     assert any(f["rule"] == "semantic_audit_unavailable" for f in final["audit_findings"])
+    assert final["audit_fallback_used"] is True
+    assert "Small scale caveat applies relative to peers." not in final["explanation"]
     assert "Tier-2 semantic audit LLM call failed (TimeoutError" in final["explanation"]

@@ -23,6 +23,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/covenant_ai"]
+exclude = ["**/.edgar_cache/**", "**/__pycache__/**", "**/*.pyc", "**/.covenant-reviewer"]
 
 [project.optional-dependencies]
 dev = ["pytest"]

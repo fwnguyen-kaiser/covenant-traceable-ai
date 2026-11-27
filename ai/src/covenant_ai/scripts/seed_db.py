@@ -14,6 +14,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import psycopg
 
@@ -49,10 +50,9 @@ def seed_database(db_url: str | None = None) -> None:
     print(f"Connecting to database {db_location}...")
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
-            print("Truncating previous baseline peer data...")
-            cur.execute("DELETE FROM financial_datapoints WHERE run_id IS NULL;")
-            cur.execute("DELETE FROM peer_companies;")
-
+            batch_id = uuid4()
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended('covenant_seed_baseline', 0))")
+            cur.execute("UPDATE peer_companies SET verified=FALSE")
             total_companies = 0
             total_fy_companies = 0
             total_ltm_companies = 0
@@ -95,28 +95,30 @@ def seed_database(db_url: str | None = None) -> None:
                         print(f"  Warning: failed to extract FY datapoints for {ticker}: {exc}")
                         continue
 
+                    errors = {}
                     ltm_pts = []
                     try:
                         ltm_pts = provider.get_peer_financials(ticker, period="LTM")
-                    except Exception:
-                        ltm_pts = []
+                    except Exception as exc:
+                        errors["LTM"] = str(exc)
 
                     cur.execute(
                         """
                         INSERT INTO peer_companies (
-                            ticker, cik, company_name, industry, sic_code,
+                            baseline_id, baseline_errors, ticker, cik, company_name, industry, sic_code,
                             exchange, ev_tier, sub_industry, customer_type,
                             classification_source, ev_ebitda_eligible,
                             latest_ev_usd, latest_ebitda_usd, latest_revenue_usd,
                             latest_period_end, da_basis, verified, selection_rationale
                         ) VALUES (
-                            %s, %s, %s, %s, %s,
+                            %s, %s::jsonb, %s, %s, %s, %s, %s,
                             %s, %s, %s, %s,
                             %s, %s,
                             %s, %s, %s,
                             %s, %s, %s, %s::jsonb
                         )
                         ON CONFLICT (ticker) DO UPDATE SET
+                            baseline_id = EXCLUDED.baseline_id, baseline_errors = EXCLUDED.baseline_errors,
                             company_name = EXCLUDED.company_name,
                             industry = EXCLUDED.industry,
                             sic_code = EXCLUDED.sic_code,
@@ -135,7 +137,7 @@ def seed_database(db_url: str | None = None) -> None:
                             selection_rationale = EXCLUDED.selection_rationale;
                         """,
                         (
-                            ticker,
+                            batch_id, json.dumps(errors), ticker,
                             cik,
                             name,
                             industry,
@@ -159,13 +161,13 @@ def seed_database(db_url: str | None = None) -> None:
                         cur.execute(
                             """
                             INSERT INTO financial_datapoints (
-                                id, run_id, peer_ticker, metric, value,
+                                baseline_id, id, run_id, peer_ticker, metric, value,
                                 currency, period, period_end, source_type,
                                 source_ref, retrieved_at
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                             """,
                             (
-                                dp.id,
+                                batch_id, dp.id,
                                 None,
                                 ticker,
                                 dp.metric,

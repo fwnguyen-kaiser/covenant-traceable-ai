@@ -12,7 +12,6 @@ over active dimensions only, falling back to curated candidate order cleanly.
 """
 from __future__ import annotations
 
-import math
 from decimal import Decimal
 from typing import Iterable
 
@@ -58,81 +57,73 @@ class PeerScreeningScore(BaseModel):
     rationale: str
 
 
-FEATURE_WEIGHTS: dict[str, float] = {
-    "log_revenue": 0.35,
-    "ebitda_margin": 0.20,
-    "gross_margin": 0.05,
-    "revenue_growth_yoy": 0.20,
-    "net_debt_to_ebitda": 0.15,
-    "capex_to_revenue": 0.05,
+FEATURE_WEIGHTS = {
+    "log_revenue": Decimal("0.35"),
+    "ebitda_margin": Decimal("0.20"),
+    "gross_margin": Decimal("0.05"),
+    "revenue_growth_yoy": Decimal("0.20"),
+    "net_debt_to_ebitda": Decimal("0.15"),
+    "capex_to_revenue": Decimal("0.05"),
 }
 
 
-def _to_float(val: Decimal | float | int | None) -> float | None:
-    if val is None:
-        return None
-    f = float(val)
-    if not math.isfinite(f):
-        return None
-    return f
-
-
-def _extract_peer_features(cand: PeerScreeningCandidate) -> dict[str, float]:
-    feats: dict[str, float] = {}
-    rev = _to_float(cand.revenue_usd)
+def _extract_peer_features(cand: PeerScreeningCandidate) -> dict[str, Decimal]:
+    feats: dict[str, Decimal] = {}
+    rev = cand.revenue_usd
     if rev is not None and rev > 0:
-        feats["log_revenue"] = math.log(rev)
+        feats["log_revenue"] = rev.ln()
 
-    eb_margin = _to_float(cand.ebitda_margin)
+    eb_margin = cand.ebitda_margin
     if eb_margin is None and rev and rev > 0 and cand.ebitda_usd is not None:
-        eb = _to_float(cand.ebitda_usd)
+        eb = cand.ebitda_usd
         if eb is not None:
             eb_margin = eb / rev
     if eb_margin is not None:
         feats["ebitda_margin"] = eb_margin
 
-    gp_margin = _to_float(cand.gross_margin)
+    gp_margin = cand.gross_margin
     if gp_margin is None and rev and rev > 0 and cand.gross_profit_usd is not None:
-        gp = _to_float(cand.gross_profit_usd)
+        gp = cand.gross_profit_usd
         if gp is not None:
             gp_margin = gp / rev
     if gp_margin is not None:
         feats["gross_margin"] = gp_margin
 
-    growth = _to_float(cand.revenue_growth_yoy)
+    growth = cand.revenue_growth_yoy
     if growth is not None:
         feats["revenue_growth_yoy"] = growth
 
-    nd_eb = _to_float(cand.net_debt_to_ebitda)
+    nd_eb = cand.net_debt_to_ebitda
     if nd_eb is not None:
         feats["net_debt_to_ebitda"] = nd_eb
 
-    capex_rev = _to_float(cand.capex_to_revenue)
+    capex_rev = cand.capex_to_revenue
     if capex_rev is not None:
         feats["capex_to_revenue"] = capex_rev
     return feats
 
 
-def _extract_target_features(profile: CompanyProfile) -> dict[str, float]:
-    feats: dict[str, float] = {}
-    rev = _to_float(profile.revenue)
-    eb = _to_float(profile.ebitda)
+def _extract_target_features(profile: CompanyProfile) -> dict[str, Decimal]:
+    feats: dict[str, Decimal] = {}
+    rev = profile.revenue
+    eb = profile.ebitda
     if rev is not None and rev > 0:
-        feats["log_revenue"] = math.log(rev)
+        feats["log_revenue"] = rev.ln()
         if eb is not None:
             feats["ebitda_margin"] = eb / rev
     if profile.revenue_growth_pct is not None:
         # revenue_growth_pct is stored in percentage points (e.g. 18 -> 18%),
         # while peer revenue_growth_yoy from XBRL is a ratio (0.18).
-        g = _to_float(profile.revenue_growth_pct)
+        g = profile.revenue_growth_pct
         if g is not None:
-            feats["revenue_growth_yoy"] = g / 100.0
+            feats["revenue_growth_yoy"] = g / 100
     if rev is not None and rev > 0 and profile.capex is not None:
-        cx = _to_float(profile.capex)
+        cx = profile.capex
         if cx is not None:
             feats["capex_to_revenue"] = cx / rev
     if eb is not None and eb > 0:
-        net_debt = _to_float(profile.total_debt - profile.cash)
+        net_debt = (profile.total_debt - profile.cash
+                    if profile.total_debt is not None and profile.cash is not None else None)
         if net_debt is not None:
             feats["net_debt_to_ebitda"] = net_debt / eb
     return feats
@@ -155,7 +146,7 @@ def score_peers(
     peer_feats = [_extract_peer_features(c) for c in cand_list]
 
     # Compute mean & std per feature across available peer + target observations
-    stats: dict[str, tuple[float, float]] = {}
+    stats: dict[str, tuple[Decimal, Decimal]] = {}
     for fname in FEATURE_WEIGHTS:
         vals = [pf[fname] for pf in peer_feats if fname in pf]
         if fname in target_feats:
@@ -163,13 +154,13 @@ def score_peers(
         if len(vals) >= 2:
             mean = sum(vals) / len(vals)
             var = sum((x - mean) ** 2 for x in vals) / len(vals)
-            std = math.sqrt(var)
+            std = var.sqrt()
             stats[fname] = (mean, std)
         elif len(vals) == 1:
-            stats[fname] = (vals[0], 0.0)
+            stats[fname] = (vals[0], Decimal(0))
 
-    target_rev = _to_float(target.revenue)
-    raw_entries: list[tuple[int, float, float, Decimal | None, str, bool, bool]] = []
+    target_rev = target.revenue
+    raw_entries: list[tuple[int, Decimal, Decimal, Decimal | None, str, bool, bool]] = []
     any_financial_scored = False
     any_biz_scored = False
 
@@ -181,19 +172,19 @@ def score_peers(
         has_biz = bool(overlaps)
         if has_biz:
             any_biz_scored = True
-            biz_score = sum(overlaps.values()) / len(overlaps)
+            biz_score = sum(Decimal(str(value)) for value in overlaps.values()) / len(overlaps)
         else:
-            biz_score = 0.5
+            biz_score = Decimal("0.5")
 
         # Quantitative weighted Z-score distance across shared target & peer features
-        active_w = 0.0
-        sq_dist = 0.0
+        active_w = Decimal(0)
+        sq_dist = Decimal(0)
         used_dims: list[str] = []
         for fname, weight in FEATURE_WEIGHTS.items():
             if fname not in pf or fname not in target_feats:
                 continue
             mean, std = stats[fname]
-            z_diff = 0.0 if std <= 1e-12 else (target_feats[fname] - pf[fname]) / std
+            z_diff = Decimal(0) if std <= Decimal("1e-12") else (target_feats[fname] - pf[fname]) / std
             sq_dist += weight * (z_diff ** 2)
             active_w += weight
             used_dims.append(fname)
@@ -201,15 +192,15 @@ def score_peers(
         has_fin = active_w > 0
         if has_fin:
             any_financial_scored = True
-            norm_dist = math.sqrt(sq_dist / active_w)
-            fin_score = 1.0 / (1.0 + norm_dist)
+            norm_dist = (sq_dist / active_w).sqrt()
+            fin_score = 1 / (1 + norm_dist)
         else:
-            fin_score = 0.5
+            fin_score = Decimal("0.5")
 
         size_dist: Decimal | None = None
-        peer_rev = _to_float(cand.revenue_usd)
+        peer_rev = cand.revenue_usd
         if target_rev and target_rev > 0 and peer_rev and peer_rev > 0:
-            size_dist = Decimal(f"{abs(math.log(peer_rev) - math.log(target_rev)):.6f}")
+            size_dist = Decimal(f"{abs(peer_rev.ln() - target_rev.ln()):.6f}")
 
         tier_label = cand.ev_tier or "unknown_tier"
         rev_m = f"${Decimal(str(cand.revenue_usd)) / Decimal('1e6'):,.0f}M" if cand.revenue_usd else "N/A"
@@ -221,13 +212,13 @@ def score_peers(
         )
         raw_entries.append((idx, biz_score, fin_score, size_dist, rationale, has_fin, has_biz))
 
-    scored: list[tuple[int, float, PeerScreeningScore]] = []
+    scored: list[tuple[int, Decimal, PeerScreeningScore]] = []
     for idx, biz_score, fin_score, size_dist, rationale, has_fin, has_biz in raw_entries:
         # Unscorable candidates (no quantitative metrics when peers ARE scorable)
         # must sort strictly below verified comparable candidates.
-        effective_fin = 0.0 if (any_financial_scored and not has_fin) else fin_score
+        effective_fin = Decimal(0) if (any_financial_scored and not has_fin) else fin_score
         # If any peer matched qualitatively, keep 30/70 blend using neutral 0.5 for untagged peers
-        total = (0.30 * biz_score + 0.70 * effective_fin) if (has_biz or any_biz_scored) else effective_fin
+        total = (Decimal("0.30") * biz_score + Decimal("0.70") * effective_fin) if (has_biz or any_biz_scored) else effective_fin
         cand = cand_list[idx]
         scored.append((
             idx,

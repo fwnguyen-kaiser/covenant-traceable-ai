@@ -30,7 +30,8 @@ def _with_raw_ebitda(data, da_ratio=Decimal("0.1")):
             income_tax_expense=Decimal(0),
             depreciation_amortization=da,
         )
-        out[ticker] = m
+        # Source fixture amounts are in ten millions of USD. Multiples stay unchanged.
+        out[ticker] = {key: value * Decimal("10000000") for key, value in m.items()}
     return out
 
 
@@ -218,8 +219,8 @@ def test_confirm_industry_override_clears_invalid_sub_industry_and_discloses_inc
                 "sub_industry": "enterprise_horizontal_saas",
                 "customer_type": CustomerType.MIXED.value,
                 "geography": "US",
-                "revenue_usd": 5000000.0,
-                "reported_ebitda_usd": 500000.0,
+                "revenue_usd": "5000000",
+                "reported_ebitda_usd": "500000",
                 "ebitda_period": "FY",
                 "field_inferences": [
                     {
@@ -241,7 +242,7 @@ def test_confirm_industry_override_clears_invalid_sub_industry_and_discloses_inc
     app = create_valuation_graph(FakeProvider(FIXTURE), checkpointer=MemorySaver(), llm_client=llm)
     cfg = {"configurable": {"thread_id": "override-sub-ind-1"}}
 
-    app.invoke({"raw_input": "Restaurant ordering platform, US, $5M rev, $500k EBITDA."}, config=cfg)
+    app.invoke({"raw_input": "Restaurant ordering platform, US, FY2025 $5M rev, $500k EBITDA."}, config=cfg)
     s2 = app.invoke(Command(resume=Industry.RESTAURANTS.value), config=cfg)
     assert s2["industry_enum"] == Industry.RESTAURANTS.value
     assert s2["company_profile"].business_profile.sub_industry == ""
@@ -413,8 +414,8 @@ def test_cli_prompt_pause_at_clarify_and_resume_postgres(tmp_path, monkeypatch):
                 "sub_industry": "vertical_and_fintech_saas",
                 "customer_type": CustomerType.B2B.value,
                 "geography": "US",
-                "revenue_usd": 10000000.0,
-                "reported_ebitda_usd": 2000000.0,
+                "revenue_usd": "10000000",
+                "reported_ebitda_usd": "2000000",
                 "ebitda_period": "FY",
                 "target_fiscal_year": 2025,
                 "field_inferences": [
@@ -493,7 +494,7 @@ def test_cli_prompt_pause_at_clarify_and_resume_postgres(tmp_path, monkeypatch):
 
 def test_fin01_string_decimal_precision_and_non_recurring_income_in_llm_extract():
     """Verify exact Decimal strings survive IEEE-754 limits and non_recurring_income subtracts cleanly."""
-    raw = "PrecisionCo provides cloud software in US. FY2025 revenue $12345678901234567.89, EBITDA $1000000.00, one-time gain $100000."
+    raw = "PrecisionCo provides cloud software in US. FY2025 revenue $12345678901234567.89, EBITDA $1000000.00, one-time gain $100000. Period ended 2025-12-31."
     llm = FakeLLMClient(
         {
             "intake_extract": {

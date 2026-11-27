@@ -84,6 +84,7 @@ class LLMInterceptor(Protocol):
 class LLMClient(Protocol):
     """Structural protocol satisfied by GeminiClient (live) and FakeLLMClient (tests)."""
 
+    local_only: bool
     config: LLMConfig
 
     def generate_structured(
@@ -141,16 +142,10 @@ def build_default_llm_client(
     *,
     interceptors: Sequence[LLMInterceptor] = (),
 ) -> LLMClient | None:
-    """Instantiate GeminiClient when GEMINI_API_KEY is available, else None."""
-    if (_read_env_or_dotenv("COVENANT_DISABLE_LLM") or "").strip().lower() in {"1", "true", "yes"}:
-        return None
-    api_key = _read_env_or_dotenv("GEMINI_API_KEY") or _read_env_or_dotenv("GOOGLE_API_KEY")
-    if not api_key:
-        return None
-    from covenant_ai.llm.gemini import GeminiClient
+    """The local-only workflow never constructs a remote model from credentials."""
+    return None
 
-    return GeminiClient(
-        api_key=api_key,
-        config=LLMConfig.from_env(),
-        interceptors=interceptors,
-    )
+
+def require_local_client(client: LLMClient | None) -> None:
+    if client is not None and getattr(client, "local_only", False) is not True:
+        raise ValueError("This workflow permits only local processing of deal data.")

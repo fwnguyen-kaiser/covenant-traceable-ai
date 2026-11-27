@@ -11,6 +11,8 @@ def fetch_peer_financials(
     failed: dict[str, str] = {}
     for t in tickers:
         try:
+            if not provider.is_verified_peer(t):
+                raise ValueError(f"{t} lacks verified US common-stock/10-K eligibility")
             new.extend(provider.get_peer_financials(t, period))
         except Exception as e:  # broad catch at the external boundary -- provider errors are non-fatal
             failed[t] = str(e)

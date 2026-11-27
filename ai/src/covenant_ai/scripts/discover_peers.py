@@ -20,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -42,7 +42,7 @@ from covenant_ai.providers.edgar import (
     _load_price_snapshot_index,
 )
 from covenant_ai.providers.market_calendar import (
-    is_non_trading_cover_date,
+    cover_price_session,
     parse_yahoo_chart_closes,
 )
 
@@ -217,41 +217,19 @@ def _resolve_cover_close(
     has no exchange close (verified against SPY market tape / NYSE calendar).
     Returns (resolved_date, price, source_ref, is_new_snapshot) or None.
     """
-    if (ticker, cover_date) in existing_snapshots:
-        px, ref = existing_snapshots[(ticker, cover_date)]
-        return cover_date, px, ref, False
-
-    spy_dates: set[date] | None = None
-
-    def _spy_dates() -> set[date] | None:
-        nonlocal spy_dates
-        if spy_dates is None and spy_trading_dates_loader is not None:
-            spy_dates = spy_trading_dates_loader()
-        return spy_dates
-
-    marker = f"prior_trading_day_for_non_trading_cover_date={cover_date.isoformat()}"
-    for offset in range(1, 6):
-        cand_dt = cover_date - timedelta(days=offset)
-        if (ticker, cand_dt) in existing_snapshots:
-            px, ref = existing_snapshots[(ticker, cand_dt)]
-            if (cover_date.weekday() >= 5 or marker in ref) and is_non_trading_cover_date(cover_date, _spy_dates()):
-                return cand_dt, px, ref, False
-
-    yahoo_closes = yahoo_closes_loader()
-    if cover_date in yahoo_closes:
-        px, ref = yahoo_closes[cover_date]
-        return cover_date, px, ref, True
-
-    # Strictly guard fallback: reject if cover_date was an active US trading session
-    if not is_non_trading_cover_date(cover_date, _spy_dates()):
+    sessions = spy_trading_dates_loader() if spy_trading_dates_loader else None
+    session = cover_price_session(cover_date, sessions)
+    if session is None:
         return None
-
-    for offset in range(1, 6):
-        cand_dt = cover_date - timedelta(days=offset)
-        if cand_dt in yahoo_closes:
-            px, ref = yahoo_closes[cand_dt]
-            tagged_ref = f"{ref}; {marker}"
-            return cand_dt, px, tagged_ref, True
+    marker = f"prior_trading_day_for_non_trading_cover_date={cover_date.isoformat()}"
+    cached = existing_snapshots.get((ticker, session))
+    if cached and cached[0] > 0 and cached[1].strip():
+        if session == cover_date or marker in cached[1]:
+            return session, *cached, False
+    quote = yahoo_closes_loader().get(session)
+    if quote and quote[0] > 0 and quote[1].strip():
+        px, ref = quote
+        return session, px, ref if session == cover_date else f"{ref}; {marker}", True
     return None
 
 

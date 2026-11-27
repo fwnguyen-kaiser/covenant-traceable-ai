@@ -1,6 +1,9 @@
 """Workflow assembly for the valuation agent StateGraph."""
 from typing import Optional
 
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -26,8 +29,43 @@ from covenant_ai.graph.nodes import (
     valuation_node,
 )
 from covenant_ai.graph.state import ValuationState
-from covenant_ai.llm.client import LLMClient
+from covenant_ai.llm.client import LLMClient, require_local_client
 from covenant_ai.providers.base import MarketDataProvider
+
+
+class CaseGraph:
+    """Guard new inputs before LangGraph writes its first checkpoint on an existing thread."""
+
+    def __init__(self, graph: CompiledStateGraph):
+        self.graph = graph
+
+    def __getattr__(self, name):
+        return getattr(self.graph, name)
+
+    def _check_start(self, value, config):
+        if value is not None and not isinstance(value, Command) and self.graph.get_state(config).created_at:
+            raise ValueError("Thread already exists. Resume the saved case or use a new thread.")
+
+    def invoke(self, input, config=None, **kwargs):
+        self._check_start(input, config)
+        return self.graph.invoke(input, config, **kwargs)
+
+    def stream(self, input, config=None, **kwargs):
+        self._check_start(input, config)
+        yield from self.graph.stream(input, config, **kwargs)
+
+    async def _acheck_start(self, value, config):
+        if value is not None and not isinstance(value, Command) and (await self.graph.aget_state(config)).created_at:
+            raise ValueError("Thread already exists. Resume the saved case or use a new thread.")
+
+    async def ainvoke(self, input, config=None, **kwargs):
+        await self._acheck_start(input, config)
+        return await self.graph.ainvoke(input, config, **kwargs)
+
+    async def astream(self, input, config=None, **kwargs):
+        await self._acheck_start(input, config)
+        async for step in self.graph.astream(input, config, **kwargs):
+            yield step
 
 
 def create_valuation_graph(
@@ -37,6 +75,7 @@ def create_valuation_graph(
     default_explain_mode: str | None = None,
 ):
     """Assemble and compile the valuation StateGraph (12 nodes with self-audit)."""
+    require_local_client(llm_client)
     resolved_explain_mode = default_explain_mode or (
         ExplainMode.LLM_HYBRID.value if llm_client is not None else ExplainMode.DETERMINISTIC.value
     )
@@ -111,4 +150,4 @@ def create_valuation_graph(
     if checkpointer is None:
         checkpointer = MemorySaver()
 
-    return builder.compile(checkpointer=checkpointer)
+    return CaseGraph(builder.compile(checkpointer=checkpointer))

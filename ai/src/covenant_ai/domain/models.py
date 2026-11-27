@@ -89,7 +89,9 @@ def infer_revenue_model_enum(raw: str | None) -> RevenueModel | None:
         return RevenueModel(norm)
     except ValueError:
         pass
-    if any(k in norm for k in ("recurring", "subscription", "saas", "arr", "retainer")):
+    if re.search(r"\bnon[- ]?recurring\b", norm) and not re.search(r"\bsubscription\b", norm):
+        return RevenueModel.ONE_OFF_SALES
+    if re.search(r"\b(recurring|subscriptions?|saas|arr|retainers?)\b", norm):
         return RevenueModel.RECURRING_SUBSCRIPTION
     if any(k in norm for k in ("hybrid", "mixed", "oem + aftermarket", "aftermarket")):
         return RevenueModel.HYBRID_MIXED
@@ -188,7 +190,7 @@ class EbitdaAdjustmentSchedule(BaseModel):
     discretionary_expenses: Decimal = Decimal(0)
     rent_adjustment: Decimal = Decimal(0)
     non_recurring_charges: Decimal = Decimal(0)
-    non_recurring_income: Decimal = Decimal(0)
+    non_recurring_income: Decimal = Field(default=Decimal(0), ge=0)
     line_items: list[AdjustmentLineItem] = Field(default_factory=list)
 
     @classmethod
@@ -355,8 +357,8 @@ class CompanyProfile(BaseModel):
     target_fiscal_year: int | None = Field(default=None, ge=1900, le=2100)
     period_end_date: date | None = None
     reported_ebitda: Decimal | None = None
-    total_debt: Decimal = Decimal(0)
-    cash: Decimal = Decimal(0)
+    total_debt: Decimal | None = Field(default=None, ge=0)
+    cash: Decimal | None = Field(default=None, ge=0)
     adjustment_schedule: EbitdaAdjustmentSchedule | None = None
     business_description: str | None = None
     geography_region: GeographyRegion | None = None
@@ -422,13 +424,16 @@ class ValuationResult(BaseModel):
     equity_low: Decimal | None = None     # Implied Equity Value = EV - Debt + Cash
     equity_mid: Decimal | None = None
     equity_high: Decimal | None = None
-    target_net_debt: Decimal = Decimal(0) # Target debt - cash
+    target_net_debt: Decimal | None = None # Target debt - cash
     ebitda_period: str
     multiples_used: dict[str, Decimal]   # ticker -> EV/EBITDA multiple
     sales_multiples_used: dict[str, Decimal] = Field(default_factory=dict)  # ticker -> EV/Sales multiple
-    implied_ev_by_sales: dict[str, Decimal] = Field(default_factory=dict)   # low, mid, high benchmark
+    implied_ev_by_sales: dict[str, Decimal | None] = Field(default_factory=dict)   # low, mid, high benchmark
     peer_stats: dict[str, dict[str, Decimal]] = Field(default_factory=dict) # min, p25, median, mean, p75, max
     excluded_peers: dict[str, str]        # ticker -> reason (removed from stats)
     outlier_flags: dict[str, str] = Field(default_factory=dict)  # flagged but still used
+    peer_flags: dict[str, dict[str, str]] = Field(default_factory=dict)
+    risk_codes: list[str] = Field(default_factory=list)
+    price_date_range: tuple[date, date] | None = None
     assumptions: dict[str, str]
     limitations: list[str]

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from covenant_ai.domain.amounts import NUMBER
 from covenant_ai.domain.industry import CustomerType, Industry, is_valid_sub_industry, sub_industries_for
 from covenant_ai.domain.intake import create_company_profile_from_intake
 from covenant_ai.domain.intake_questions import Stage, missing_required
@@ -14,7 +15,7 @@ from covenant_ai.domain.models import (
     FieldInference,
     InferenceSource,
 )
-from covenant_ai.llm.client import LLMClient
+from covenant_ai.llm.client import LLMClient, require_local_client
 from covenant_ai.llm.prompts import INTAKE_SYSTEM_PROMPT
 from covenant_ai.llm.schemas import IntakeExtractionResponse
 
@@ -46,6 +47,36 @@ def verify_quote_in_source(quote: str | None, raw_input: str) -> bool:
     if not norm_q or len(norm_q) < 2:
         return False
     return norm_q in norm_src
+
+
+_QUANTITY = (r"(?<![\w.,+-])(?P<negative>-?)\s*(?:USD\s*|\$\s*)?(?P<num>" + NUMBER +
+             r")\s*(?P<unit>billion|million|thousand|bn|[kmb]|%)?(?!\w|[.,]\d)")
+_SCALE = {"k": 1000, "thousand": 1000, "m": 1000000, "million": 1000000,
+          "b": 1000000000, "bn": 1000000000, "billion": 1000000000}
+_LABELS = {
+    "revenue": r"(?:revenue|rev|sales|doanh thu)", "ebitda": r"(?:reported\s+)?EBITDA",
+    "total_debt": r"(?:total\s+)?debt", "cash": r"cash(?:\s+balance)?",
+    "capex": r"(?:capex|capital expenditures)", "customer_concentration_pct": r"(?:customer concentration|largest customer)",
+    "revenue_growth_pct": r"(?:revenue growth|sales growth)",
+}
+_JOIN = r"\s*(?:(?:of|was|is|at|in)\s+|[:=]\s*)?"
+
+def _quantity(match: re.Match) -> Decimal:
+    number = Decimal(match["num"].replace(",", ""))
+    factor = Decimal(_SCALE.get((match["unit"] or "").lower(), 1))
+    return number * factor * (-1 if match["negative"] else 1)
+
+def _field_evidence(field: str, expected: Decimal, text: str) -> str | None:
+    label = r"\b" + _LABELS[field] + r"\b"
+    # Prefer label followed by amount. The reverse form supports "$5M revenue".
+    hits = []
+    for pattern in (label + _JOIN + _QUANTITY, _QUANTITY + _JOIN + label):
+        for match in re.finditer(pattern, text, re.I):
+            if (match["unit"] == "%") == field.endswith("_pct"):
+                hits.append((_quantity(match), match.group().strip()))
+    if hits and {v for v, _ in hits} == {expected}:
+        return hits[0][1]
+    return None
 
 
 def _build_intake_user_prompt(
@@ -101,6 +132,7 @@ def extract_intake_from_text(
 ) -> IntakePreparationResult:
     """Run LLM extraction on unstructured input, verify quotes, and check USD/required readiness."""
     prompt = _build_intake_user_prompt(raw_input, existing_answers, locked_overrides)
+    require_local_client(client)
     resp = client.generate_structured(
         prompt=prompt,
         system_prompt=INTAKE_SYSTEM_PROMPT,
@@ -116,6 +148,24 @@ def extract_intake_from_text(
         if v is not None and (not isinstance(v, str) or v.strip())
     }
     llm_inferred_targets: set[str] = set()
+    evidence_questions: list[str] = []
+    numeric_quotes: dict[str, str] = {}
+    def set_amount(key: str, value: str) -> None:
+        if key in overrides:
+            set_if_present(key, value)
+            return
+        # A later explicit correction for this field supersedes earlier input.
+        for part in reversed(raw_input.split("\nUser clarification:")):
+            if re.search(r"\b" + _LABELS[key] + r"\b", part, re.I):
+                break
+        quote = _field_evidence(key, Decimal(value), part)
+        if quote is None:
+            merged.pop(key, None)
+            evidence_questions.append(f"Please confirm {key} and its exact amount; source evidence is missing or ambiguous.")
+        else:
+            numeric_quotes[key] = quote
+            set_if_present(key, value)
+
 
     def set_if_present(key: str, val: Any, *, track_provenance: bool = False) -> None:
         if val is None:
@@ -138,28 +188,40 @@ def extract_intake_from_text(
         set_if_present("industry", resp.industry.value, track_provenance=True)
     set_if_present("geography", resp.geography)
     if resp.revenue_usd is not None:
-        set_if_present("revenue", str(Decimal(resp.revenue_usd)))
+        set_amount("revenue", resp.revenue_usd)
     if resp.reported_ebitda_usd is not None:
-        set_if_present("ebitda", str(Decimal(resp.reported_ebitda_usd)))
+        set_amount("ebitda", resp.reported_ebitda_usd)
     if resp.ebitda_period is not None:
-        set_if_present("ebitda_period", resp.ebitda_period.value, track_provenance=True)
+        basis = resp.ebitda_period.value
+        pattern = r"\b(?:FY(?:[ -]?\d{4})?|fiscal year)\b" if basis == "FY" else r"\b(?:LTM|TTM|trailing twelve months|last twelve months)\b"
+        if "ebitda_period" in overrides or re.search(pattern, raw_input, re.I):
+            set_if_present("ebitda_period", basis, track_provenance=True)
+        else:
+            merged.pop("ebitda_period", None)
+            evidence_questions.append("Confirm whether the source figures cover FY or LTM.")
     if resp.target_fiscal_year is not None:
-        set_if_present("target_fiscal_year", resp.target_fiscal_year)
+        if "target_fiscal_year" in overrides or re.search(rf"(?<!\d){resp.target_fiscal_year}(?!\d)", raw_input):
+            set_if_present("target_fiscal_year", resp.target_fiscal_year)
+        else:
+            evidence_questions.append("Confirm the target fiscal year.")
     if resp.period_end_date:
-        set_if_present("period_end_date", resp.period_end_date)
+        if "period_end_date" in overrides or resp.period_end_date in raw_input:
+            set_if_present("period_end_date", resp.period_end_date)
+        else:
+            evidence_questions.append("Confirm the period end date as YYYY-MM-DD.")
     if resp.revenue_model is not None:
         set_if_present("revenue_model", resp.revenue_model.value, track_provenance=True)
     set_if_present("revenue_model_note", resp.revenue_model_note)
     if resp.customer_concentration_pct is not None:
-        set_if_present("customer_concentration_pct", str(Decimal(resp.customer_concentration_pct)))
+        set_amount("customer_concentration_pct", resp.customer_concentration_pct)
     if resp.revenue_growth_pct is not None:
-        set_if_present("revenue_growth_pct", str(Decimal(resp.revenue_growth_pct)))
+        set_amount("revenue_growth_pct", resp.revenue_growth_pct)
     if resp.capex_usd is not None:
-        set_if_present("capex", str(Decimal(resp.capex_usd)))
+        set_amount("capex", resp.capex_usd)
     if resp.total_debt_usd is not None:
-        set_if_present("total_debt", str(Decimal(resp.total_debt_usd)))
+        set_amount("total_debt", resp.total_debt_usd)
     if resp.cash_usd is not None:
-        set_if_present("cash", str(Decimal(resp.cash_usd)))
+        set_amount("cash", resp.cash_usd)
     set_if_present("credit_rating", resp.credit_rating)
     if resp.products_services and "products_services" not in overrides:
         merged["products_services"] = list(resp.products_services)
@@ -192,10 +254,11 @@ def extract_intake_from_text(
     for entry in resp.field_inferences:
         if entry.field_name in overrides:
             continue
-        q_ok = verify_quote_in_source(entry.evidence_quote, raw_input)
+        q_ok = (verify_quote_in_source(entry.evidence_quote, raw_input)
+                and str(merged.get(entry.field_name)) == entry.value)
         provenance[entry.field_name] = FieldInference(
             field_name=entry.field_name,
-            value=entry.value,
+            value=str(merged.get(entry.field_name, entry.value)),
             confidence=entry.confidence,
             evidence_quote=entry.evidence_quote,
             quote_verified=q_ok,
@@ -206,6 +269,9 @@ def extract_intake_from_text(
                 f"Inferred field {entry.field_name!r}={entry.value!r} lacked a verified verbatim quote in user input."
             )
 
+    for key, quote in numeric_quotes.items():
+        provenance[key] = FieldInference(field_name=key, value=merged[key], confidence=1,
+                                         evidence_quote=quote, quote_verified=True, source=InferenceSource.LLM_INFERRED)
     # Record explicit user overrides and enforce provenance completeness on inferred fields
     for k, v in overrides.items():
         provenance[k] = FieldInference(
@@ -234,14 +300,30 @@ def extract_intake_from_text(
                 )
 
     # Process EBITDA add-back / deduction line items with quote verification & Decimal parsing
-    if resp.adjustments and "adjustment_items" not in overrides:
+    if "adjustments" in resp.model_fields_set and "adjustment_items" not in overrides:
         adj_items: list[dict[str, Any]] = []
         for idx, item in enumerate(resp.adjustments):
             q_ok = verify_quote_in_source(item.evidence_quote, raw_input)
-            if not q_ok:
+            numbers = [m for m in re.finditer(_QUANTITY, item.evidence_quote, re.I) if m["unit"] != "%"]
+            amount = Decimal(item.amount_usd)
+            income = item.category.value == "non_recurring_income"
+            matched = len(numbers) == 1 and (_quantity(numbers[0]) == amount or
+                                              (income and abs(_quantity(numbers[0])) == abs(amount)))
+            duplicate = any(adj["evidence_quote"] == item.evidence_quote for adj in adj_items)
+            anchors = {
+                "owner_compensation": r"owner|salary|compensation",
+                "discretionary_expenses": r"personal|discretionary|perk",
+                "related_party_rent": r"rent|lease",
+                "non_recurring_charges": r"cost|expense|charge|settlement|repair|fee|litigation",
+                "non_recurring_income": r"income|gain|proceeds|subsid",
+            }
+            direction = re.search(anchors.get(item.category.value, r"(?!)"), item.evidence_quote, re.I)
+            if not q_ok or not matched or duplicate or not direction:
+                evidence_questions.append(f"Confirm the amount and direction of adjustment {idx + 1}: {item.description}")
                 inconsistencies.append(
                     f"EBITDA adjustment #{idx + 1} ({item.description}) lacked a verified verbatim quote."
                 )
+                continue
             adj_items.append(
                 {
                     "category": item.category.value,
@@ -262,9 +344,12 @@ def extract_intake_from_text(
         merged["inconsistencies"] = inconsistencies
 
     # Determine whether clarification is required (Non-USD, missing required, missing explicit period, sanity)
-    clarify_reasons: list[str] = list(resp.clarify_questions)
-    if resp.non_usd_currency_detected:
-        cur = resp.non_usd_currency_detected.strip()
+    clarify_reasons: list[str] = [*resp.clarify_questions, *evidence_questions]
+    last_input = raw_input.split("\nUser clarification:")[-1]
+    foreign = re.search(r"\b(?:VND|EUR|GBP|CAD|AUD|JPY|CNY|đồng)\b|[€£¥]", last_input, re.I)
+    non_usd = resp.non_usd_currency_detected or (foreign.group() if foreign else None)
+    if non_usd:
+        cur = non_usd.strip()
         inconsistencies.append(
             f"Non-USD currency ({cur}) was mentioned in raw intake; USD conversion requested before valuation."
         )
@@ -301,14 +386,14 @@ def extract_intake_from_text(
             inconsistencies.append(f"Intake validation raised sanity error: {sanity_error}")
             clarify_reasons.append(f"Please clarify conflicting financial figures: {sanity_error}")
 
-    clarify_needed = bool(resp.non_usd_currency_detected or missing_ids or sanity_error)
+    clarify_needed = bool(clarify_reasons)
     clarify_payload: dict[str, Any] = {}
     if clarify_needed:
         clarify_payload = {
             "action": "intake_clarify",
             "questions": list(dict.fromkeys(clarify_reasons)),
             "missing_fields": missing_ids,
-            "non_usd_currency": resp.non_usd_currency_detected,
+            "non_usd_currency": non_usd,
             "sanity_error": sanity_error,
             "extracted_draft": {
                 k: merged.get(k)

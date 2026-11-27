@@ -6,24 +6,25 @@ append-only audit logs matching db/init.sql and docs/covenant-erd.mmd.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
+import hashlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID, uuid5
 
 import psycopg
 
+from covenant_ai.domain.bridge import build_peer_financials
 from covenant_ai.domain.models import CompanyProfile, FinancialDatapoint
 from covenant_ai.domain.screening import PeerScreeningScore
+from covenant_ai.providers.reviewer import authorized_windows_reviewer
 from covenant_ai.providers.db_schema import ensure_domain_schema, normalize_db_url
 
 
 def _coerce_uuid(raw_id: Any) -> UUID:
-    try:
-        return UUID(str(raw_id))
-    except Exception:
-        return uuid4()
+    return UUID(str(raw_id))
 
 
 def _json_default(obj: Any) -> Any:
@@ -40,6 +41,39 @@ def _to_jsonb(data: Any) -> str:
     return json.dumps(data, default=_json_default)
 
 
+def _profile_digest(profile: CompanyProfile, answers: dict | None) -> str:
+    encoded = json.dumps([profile.model_dump(mode="json"), answers or {}], sort_keys=True, default=_json_default)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def make_review_packet(run_id: UUID, state: dict) -> dict:
+    keys = ("valuation", "company_profile", "selected_peers", "peer_screening_results", "failed_peers",
+            "audit_verdict", "audit_findings", "audit_fallback_used", "explain_mode", "prompt_version",
+            "inconsistencies", "explanation", "peer_review_rationale", "review_decisions", "intake_provenance")
+    valuation = state.get("valuation") or {}
+    ledger = state.get("ledger") or []
+    by_peer = {}
+    for ticker in valuation.get("multiples_used", {}):
+        _, ids = build_peer_financials(ledger, ticker, valuation["ebitda_period"])
+        by_peer[ticker] = [str(uuid5(run_id, origin)) for origin in ids]
+    return {
+        "lineage": {
+            "ev_mid": {"formula": "median(peer EV/EBITDA) * target normalized EBITDA",
+                       "peer_snapshot_ids": by_peer,
+                       "target_snapshot_ids": [str(uuid5(run_id, str(d.id))) for d in ledger if not d.peer_ticker]},
+            "equity_mid": {"formula": "max(0, ev_mid - target debt + target cash)",
+                           "inputs": ["company_profile.total_debt", "company_profile.cash"]},
+        },
+        **{key: state.get(key) for key in keys},
+        "method_version": "cover-gaap-v2",
+        "release_status": "draft",
+        "sources": [
+            {**dp.model_dump(mode="json"), "snapshot_id": str(uuid5(run_id, str(dp.id)))}
+            for dp in state.get("ledger") or []
+        ],
+    }
+
+
 class PostgresCaseRepository:
     """Transactional audit repository backed by Docker PostgreSQL."""
 
@@ -48,6 +82,35 @@ class PostgresCaseRepository:
         if auto_migrate:
             ensure_domain_schema(self.db_url)
 
+    @contextmanager
+    def thread_lock(self, thread_id: str):
+        """Serialize starts, checkpoint transitions and publication of the domain snapshot."""
+        with psycopg.connect(self.db_url, autocommit=True, connect_timeout=5) as conn:
+            acquired = conn.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (thread_id,)
+            ).fetchone()[0]
+            if not acquired:
+                raise ValueError("Another session is already operating on this thread.")
+            yield
+
+    def sync_profile(self, thread_id: str, profile: CompanyProfile, answers: dict | None) -> tuple:
+        """Reconcile against the committed profile version in one transaction."""
+        with psycopg.connect(self.db_url, connect_timeout=5) as conn:
+            row = conn.execute(
+                "SELECT r.id, r.case_id, r.status, p.extra->>'profile_digest' "
+                "FROM analysis_runs r LEFT JOIN company_profiles p ON p.id=r.profile_id "
+                "WHERE r.thread_id=%s FOR UPDATE OF r", (thread_id,)
+            ).fetchone()
+            if row is None:
+                case_id, profile_id = self.create_case_and_profile(profile, answers, connection=conn)
+                run_id = self.start_analysis_run(case_id, profile_id, thread_id, connection=conn)
+                return case_id, run_id
+            run_id, case_id, status, digest = row
+            if status == "running" and digest != _profile_digest(profile, answers):
+                _, profile_id = self.create_case_and_profile(profile, answers, case_id=case_id, connection=conn)
+                conn.execute("UPDATE analysis_runs SET profile_id=%s WHERE id=%s", (profile_id, run_id))
+            return case_id, run_id
+
     def create_case_and_profile(
         self,
         profile: CompanyProfile,
@@ -55,6 +118,7 @@ class PostgresCaseRepository:
         *,
         case_id: UUID | None = None,
         actor_id: UUID | None = None,
+        connection: psycopg.Connection | None = None,
     ) -> tuple[UUID, UUID]:
         """Insert/update a case row and append a new versioned company_profiles row."""
         extra_payload = {
@@ -100,9 +164,10 @@ class PostgresCaseRepository:
             ),
             "inconsistencies": list(profile.inconsistencies),
             "intake_answers": intake_answers or {},
+            "profile_digest": _profile_digest(profile, intake_answers),
         }
 
-        with psycopg.connect(self.db_url, connect_timeout=5) as conn:
+        with (nullcontext(connection) if connection is not None else psycopg.connect(self.db_url, connect_timeout=5)) as conn:
             with conn.cursor() as cur:
                 if case_id is None:
                     cur.execute(
@@ -162,7 +227,6 @@ class PostgresCaseRepository:
                         _to_jsonb({"case_id": str(resolved_case_id), "version": next_version}),
                     ),
                 )
-            conn.commit()
         return _coerce_uuid(resolved_case_id), _coerce_uuid(profile_id)
 
     def start_analysis_run(
@@ -173,9 +237,10 @@ class PostgresCaseRepository:
         *,
         ai_run_id: str | None = None,
         actor_id: UUID | None = None,
+        connection: psycopg.Connection | None = None,
     ) -> UUID:
         """Create a new analysis_runs record bound to a LangGraph thread_id."""
-        with psycopg.connect(self.db_url, connect_timeout=5) as conn:
+        with (nullcontext(connection) if connection is not None else psycopg.connect(self.db_url, connect_timeout=5)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -204,7 +269,6 @@ class PostgresCaseRepository:
                         _to_jsonb({"case_id": str(case_id), "thread_id": thread_id}),
                     ),
                 )
-            conn.commit()
         return _coerce_uuid(run_id)
 
     def get_run_by_thread_id(self, thread_id: str) -> tuple[UUID, UUID, str] | None:
@@ -231,10 +295,48 @@ class PostgresCaseRepository:
         with psycopg.connect(self.db_url, connect_timeout=5) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE analysis_runs SET profile_id = %s WHERE id = %s;",
+                    "UPDATE analysis_runs SET profile_id = %s WHERE id = %s AND status = 'running';",
                     (str(profile_id), str(run_id)),
                 )
             conn.commit()
+
+    def review_report(self, thread_id: str, digest: str | None = None) -> dict:
+        """Read a frozen packet or confirm the exact version seen by the authorized reviewer."""
+        with psycopg.connect(self.db_url, connect_timeout=5) as conn:
+            row = conn.execute(
+                "SELECT id, case_id, review_packet FROM analysis_runs WHERE thread_id=%s AND status='completed' FOR UPDATE",
+                (thread_id,),
+            ).fetchone()
+            if not row or not row[2]:
+                raise ValueError("No versioned report is available for this thread.")
+            run_id, case_id, packet = row
+            encoded = json.dumps(packet, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            fingerprint = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            if digest is not None:
+                reviewer = authorized_windows_reviewer()
+                if fingerprint != digest or packet.get("audit_verdict") not in {"warn", "pass"}:
+                    raise ValueError("Approval requires the reviewed digest, authorized identity and a completed audit.")
+                conn.execute(
+                    "INSERT INTO report_approvals(run_id, digest, reviewer_sid) VALUES (%s,%s,%s) "
+                    "ON CONFLICT (run_id) DO NOTHING", (run_id, fingerprint, reviewer)
+                )
+            approval = conn.execute(
+                "SELECT reviewer_sid, approved_at FROM report_approvals WHERE run_id=%s AND digest=%s",
+                (run_id, fingerprint)
+            ).fetchone()
+            return {**packet, "thread_id": thread_id, "run_id": str(run_id), "case_id": str(case_id),
+                    "digest": fingerprint, "release_status": "approved" if approval else "draft",
+                    "approved_by": approval[0] if approval else None,
+                    "approved_at": approval[1].isoformat() if approval else None}
+
+    def sync_decisions(self, run_id: UUID, state: dict) -> None:
+        with psycopg.connect(self.db_url, connect_timeout=5) as conn:
+            for index, event in enumerate(state.get("review_decisions") or []):
+                conn.execute(
+                    "INSERT INTO audit_logs(action,entity_type,entity_id,detail,decision_index) "
+                    "VALUES (%s,'analysis_runs',%s,%s::jsonb,%s) ON CONFLICT DO NOTHING",
+                    (event["action"], run_id, _to_jsonb({"decision": event["decision"]}), index),
+                )
 
     def append_audit_log(
         self,
@@ -287,14 +389,13 @@ class PostgresCaseRepository:
                     """
                     UPDATE analysis_runs
                     SET status = %s, finished_at = CURRENT_TIMESTAMP
-                    WHERE id = %s;
+                    WHERE id = %s AND status = 'running'
+                    RETURNING id;
                     """,
                     (status, str(run_id)),
                 )
-
-                # Replace any prior candidates/datapoints belonging strictly to this run_id
-                cur.execute("DELETE FROM peer_candidates WHERE run_id = %s;", (str(run_id),))
-                cur.execute("DELETE FROM financial_datapoints WHERE run_id = %s;", (str(run_id),))
+                if cur.fetchone() is None:
+                    return
 
                 seen_tickers: set[str] = set()
                 for row in screening_rows:
@@ -368,7 +469,7 @@ class PostgresCaseRepository:
                             str(run_id),
                             tu,
                             cand_status,
-                            _to_jsonb({"source": "manual_or_fallback"}),
+                            _to_jsonb({"source": "manual_or_fallback", "reason": (state.get("peer_review_rationale") or {}).get(tu)}),
                             failed_peers.get(tu),
                         ),
                     )
@@ -378,12 +479,12 @@ class PostgresCaseRepository:
                     cur.execute(
                         """
                         INSERT INTO financial_datapoints (
-                            id, run_id, peer_ticker, metric, value, currency,
+                            id, origin_id, run_id, peer_ticker, metric, value, currency,
                             period, period_end, source_type, source_ref, retrieved_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                         """,
                         (
-                            str(uuid4()),
+                            str(uuid5(run_id, str(dp.id))), str(dp.id),
                             str(run_id),
                             dp.peer_ticker,
                             dp.metric,
@@ -395,6 +496,13 @@ class PostgresCaseRepository:
                             dp.source_ref,
                             dp.retrieved_at or datetime.now(UTC),
                         ),
+                    )
+
+                if status == "completed" and state.get("explanation"):
+                    packet = make_review_packet(run_id, state) if state.get("integrity_version") == 2 else None
+                    cur.execute(
+                        "UPDATE analysis_runs SET review_packet=%s::jsonb WHERE id=%s",
+                        (_to_jsonb(packet) if packet else None, run_id),
                     )
 
                 if isinstance(val, dict) and val.get("ev_low") is not None:
@@ -410,24 +518,6 @@ class PostgresCaseRepository:
                             %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s,
                             %s, %s, %s, %s::jsonb, %s
                         )
-                        ON CONFLICT (run_id) DO UPDATE SET
-                            ev_low = EXCLUDED.ev_low,
-                            ev_mid = EXCLUDED.ev_mid,
-                            ev_high = EXCLUDED.ev_high,
-                            equity_low = EXCLUDED.equity_low,
-                            equity_mid = EXCLUDED.equity_mid,
-                            equity_high = EXCLUDED.equity_high,
-                            multiples_used = EXCLUDED.multiples_used,
-                            sales_multiples_used = EXCLUDED.sales_multiples_used,
-                            peer_stats = EXCLUDED.peer_stats,
-                            outlier_flags = EXCLUDED.outlier_flags,
-                            excluded_peers = EXCLUDED.excluded_peers,
-                            limitations = EXCLUDED.limitations,
-                            explanation_md = EXCLUDED.explanation_md,
-                            narrative_md = EXCLUDED.narrative_md,
-                            audit_verdict = EXCLUDED.audit_verdict,
-                            audit_findings = EXCLUDED.audit_findings,
-                            prompt_version = EXCLUDED.prompt_version;
                         """,
                         (
                             str(run_id),
