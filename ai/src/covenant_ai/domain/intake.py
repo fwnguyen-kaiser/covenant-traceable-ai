@@ -9,6 +9,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from covenant_ai.domain.amounts import parse_amount
 from covenant_ai.domain.business_profile import BusinessProfile
 from covenant_ai.domain.industry import CustomerType, is_valid_sub_industry
 from covenant_ai.domain.intake_questions import (
@@ -37,7 +38,7 @@ def _parse_optional_decimal(raw: Any, strip_percent: bool = False) -> Decimal | 
         return None
     if strip_percent and s.endswith("%"):
         s = s[:-1].strip()
-    return Decimal(s)
+    return parse_amount(s if strip_percent and isinstance(raw, str) else raw)
 
 
 def _parse_str_tuple(raw: Any) -> tuple[str, ...]:
@@ -68,9 +69,9 @@ def create_company_profile_from_intake(
     company_name = str(answers["company_name"]).strip()
     industry = str(answers.get("industry") or "").strip()
     geography = str(answers.get("geography") or "US").strip()
-    revenue = Decimal(str(answers["revenue"]))
-    reported_ebitda = Decimal(str(answers["ebitda"]))
-    raw_period_orig = str(answers.get("ebitda_period") or EbitdaPeriod.FY.value).strip()
+    revenue = parse_amount(answers["revenue"])
+    reported_ebitda = parse_amount(answers["ebitda"])
+    raw_period_orig = str(answers.get("ebitda_period") or "").strip()
     raw_period = raw_period_orig.upper()
     extracted_fy_year: int | None = None
     fy_match = re.fullmatch(r"FY[\s-]?(\d{4})?", raw_period)
@@ -115,12 +116,20 @@ def create_company_profile_from_intake(
         )
 
     # Build adjustment schedule
+    if answers.get("one_off_items") and str(answers["one_off_items"]).strip().lower() not in ("none", "no", "0"):
+        raise ValueError("Supply one-off items as structured adjustment_items with category, description and amount.")
     raw_schedule = answers.get("adjustment_schedule")
+    if isinstance(raw_schedule, Mapping):
+        raw_schedule = EbitdaAdjustmentSchedule.model_validate(raw_schedule)
     if isinstance(raw_schedule, EbitdaAdjustmentSchedule):
+        if raw_schedule.reported_ebitda != reported_ebitda:
+            raise ValueError("Adjustment schedule reported EBITDA differs from target accounts.")
         schedule = raw_schedule
     else:
         raw_items = answers.get("adjustment_items") or answers.get("line_items")
-        if raw_items and isinstance(raw_items, list):
+        if raw_items and not isinstance(raw_items, list):
+            raise ValueError("adjustment_items must be a list.")
+        if raw_items:
             items: list[AdjustmentLineItem] = []
             for item in raw_items:
                 if isinstance(item, AdjustmentLineItem):
@@ -131,7 +140,7 @@ def create_company_profile_from_intake(
                         AdjustmentLineItem(
                             category=AdjustmentCategory(item.get("category", "other")),
                             description=str(item.get("description", "")),
-                            amount=Decimal(str(item.get("amount", 0))),
+                            amount=parse_amount(item.get("amount")),
                             source_note=str(item.get("source_note", "")),
                             confidence=item.get("confidence"),
                             evidence_quote=item.get("evidence_quote"),
@@ -139,16 +148,32 @@ def create_company_profile_from_intake(
                             inference_source=InferenceSource(src_raw),
                         )
                     )
+                else:
+                    raise ValueError("Each adjustment needs a category, description and amount.")
+            for key, category in (
+                ("owner_compensation_adjustment", AdjustmentCategory.OWNER_COMPENSATION),
+                ("discretionary_expenses", AdjustmentCategory.DISCRETIONARY_EXPENSES),
+                ("rent_adjustment", AdjustmentCategory.RELATED_PARTY_RENT),
+                ("non_recurring_charges", AdjustmentCategory.NON_RECURRING_CHARGES),
+                ("non_recurring_income", AdjustmentCategory.NON_RECURRING_INCOME),
+            ):
+                amount = parse_amount(answers.get(key) or 0)
+                if amount:
+                    if any(i.category == category for i in items):
+                        raise ValueError(f"Supply either {key} or its itemized breakdown for that category.")
+                    if category == AdjustmentCategory.NON_RECURRING_INCOME and amount < 0:
+                        raise ValueError("Use a positive magnitude for non-recurring income.")
+                    items.append(AdjustmentLineItem(category=category, description=key, amount=amount))
             schedule = EbitdaAdjustmentSchedule.from_line_items(
                 reported_ebitda=reported_ebitda,
                 items=items,
             )
         else:
-            owner_comp = Decimal(str(answers.get("owner_compensation_adjustment", 0) or 0))
-            discretionary = Decimal(str(answers.get("discretionary_expenses", 0) or 0))
-            rent = Decimal(str(answers.get("rent_adjustment", 0) or 0))
-            charges = Decimal(str(answers.get("non_recurring_charges", 0) or 0))
-            income = Decimal(str(answers.get("non_recurring_income", 0) or 0))
+            owner_comp = parse_amount(answers.get("owner_compensation_adjustment", 0) or 0)
+            discretionary = parse_amount(answers.get("discretionary_expenses", 0) or 0)
+            rent = parse_amount(answers.get("rent_adjustment", 0) or 0)
+            charges = parse_amount(answers.get("non_recurring_charges", 0) or 0)
+            income = parse_amount(answers.get("non_recurring_income", 0) or 0)
 
             schedule = EbitdaAdjustmentSchedule(
                 reported_ebitda=reported_ebitda,
@@ -159,12 +184,12 @@ def create_company_profile_from_intake(
                 non_recurring_income=income,
             )
 
-    total_debt = Decimal(str(answers.get("total_debt", 0) or 0))
-    cash = Decimal(str(answers.get("cash", 0) or 0))
+    total_debt = _parse_optional_decimal(answers.get("total_debt"))
+    cash = _parse_optional_decimal(answers.get("cash"))
 
-    if total_debt < 0:
+    if total_debt is not None and total_debt < 0:
         raise ValueError("Total debt cannot be negative.")
-    if cash < 0:
+    if cash is not None and cash < 0:
         raise ValueError("Cash cannot be negative.")
 
     capex = _parse_optional_decimal(answers.get("capex"))

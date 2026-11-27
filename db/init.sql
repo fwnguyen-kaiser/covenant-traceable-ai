@@ -28,10 +28,10 @@ CREATE TABLE IF NOT EXISTS company_profiles (
     version INT DEFAULT 1,
     industry VARCHAR(100),
     geography VARCHAR(100) DEFAULT 'US',
-    revenue NUMERIC(18, 4),
-    ebitda NUMERIC(18, 4) NOT NULL,
-    total_debt NUMERIC(18, 4) DEFAULT 0,
-    cash NUMERIC(18, 4) DEFAULT 0,
+    revenue NUMERIC,
+    ebitda NUMERIC NOT NULL,
+    total_debt NUMERIC,
+    cash NUMERIC,
     extra JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     profile_id UUID REFERENCES company_profiles(id) ON DELETE SET NULL,
     status VARCHAR(50) DEFAULT 'running',
     ai_run_id VARCHAR(100),
+    review_packet JSONB,
     thread_id VARCHAR(100), -- LangGraph checkpoint thread_id
     started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     finished_at TIMESTAMP WITH TIME ZONE
@@ -50,6 +51,8 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
 
 -- 5. PEER COMPANIES (Verified universe from SEC EDGAR)
 CREATE TABLE IF NOT EXISTS peer_companies (
+    baseline_id UUID,
+    baseline_errors JSONB,
     ticker VARCHAR(20) PRIMARY KEY,
     cik VARCHAR(20) NOT NULL,
     company_name VARCHAR(255) NOT NULL,
@@ -73,6 +76,8 @@ CREATE TABLE IF NOT EXISTS peer_companies (
 CREATE INDEX IF NOT EXISTS idx_peer_companies_industry ON peer_companies(industry);
 
 -- 5B. PEER CANDIDATES (Per-run screening scores & inclusion/exclusion audit)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_unique_thread ON analysis_runs(thread_id) WHERE thread_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS peer_candidates (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     run_id UUID NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
@@ -91,11 +96,13 @@ CREATE INDEX IF NOT EXISTS idx_peer_candidates_run ON peer_candidates(run_id);
 
 -- 6. FINANCIAL DATAPOINT (Audit Ledger - Append-Only)
 CREATE TABLE IF NOT EXISTS financial_datapoints (
+    origin_id UUID,
+    baseline_id UUID,
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     run_id UUID REFERENCES analysis_runs(id) ON DELETE CASCADE,
     peer_ticker VARCHAR(20), -- NULL for target company
     metric VARCHAR(100) NOT NULL,
-    value NUMERIC(18, 4) NOT NULL,
+    value NUMERIC NOT NULL,
     currency VARCHAR(10) DEFAULT 'USD',
     period VARCHAR(20) DEFAULT 'LTM',
     period_end DATE,
@@ -111,12 +118,12 @@ CREATE INDEX IF NOT EXISTS idx_datapoints_ticker_metric ON financial_datapoints(
 CREATE TABLE IF NOT EXISTS valuation_results (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     run_id UUID UNIQUE REFERENCES analysis_runs(id) ON DELETE CASCADE,
-    ev_low NUMERIC(18, 4) NOT NULL,
-    ev_mid NUMERIC(18, 4) NOT NULL,
-    ev_high NUMERIC(18, 4) NOT NULL,
-    equity_low NUMERIC(18, 4),
-    equity_mid NUMERIC(18, 4),
-    equity_high NUMERIC(18, 4),
+    ev_low NUMERIC NOT NULL,
+    ev_mid NUMERIC NOT NULL,
+    ev_high NUMERIC NOT NULL,
+    equity_low NUMERIC,
+    equity_mid NUMERIC,
+    equity_high NUMERIC,
     multiples_used JSONB DEFAULT '{}'::jsonb,
     sales_multiples_used JSONB DEFAULT '{}'::jsonb,
     peer_stats JSONB DEFAULT '{}'::jsonb,
@@ -133,6 +140,7 @@ CREATE TABLE IF NOT EXISTS valuation_results (
 
 -- 7. AUDIT LOG
 CREATE TABLE IF NOT EXISTS audit_logs (
+    decision_index INT,
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
     action VARCHAR(100) NOT NULL,
@@ -141,3 +149,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     detail JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_event ON audit_logs(entity_id,decision_index) WHERE decision_index IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS report_approvals (run_id UUID PRIMARY KEY REFERENCES analysis_runs(id) ON DELETE CASCADE, digest TEXT NOT NULL, reviewer_sid TEXT NOT NULL, approved_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP);

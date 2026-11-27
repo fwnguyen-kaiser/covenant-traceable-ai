@@ -38,6 +38,9 @@ class FakeProvider:
     def __init__(self, data: dict[str, dict[str, Decimal]]):
         self.data = data
 
+    def is_verified_peer(self, ticker: str) -> bool:
+        return ticker in self.data
+
     def get_peer_financials(self, ticker: str, period: str) -> list[FinancialDatapoint]:
         if ticker not in self.data:
             raise KeyError(f"unknown ticker {ticker}")

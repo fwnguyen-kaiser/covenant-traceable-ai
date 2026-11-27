@@ -16,7 +16,7 @@ import os
 import re
 import time
 import urllib.request
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -28,7 +28,7 @@ from covenant_ai.domain.screening import PeerScreeningCandidate
 from covenant_ai.providers.base import MarketDataProvider
 from covenant_ai.providers.db_schema import _read_env_var
 from covenant_ai.providers.market_calendar import (
-    is_non_trading_cover_date,
+    cover_price_session,
     parse_yahoo_chart_closes,
 )
 
@@ -317,12 +317,13 @@ class EdgarMarketDataProvider:
                 cached_file = double_json
 
         if cached_file.exists():
-            return json.loads(cached_file.read_text(encoding="utf-8"))
+            return json.loads(cached_file.read_bytes(), parse_float=Decimal)
 
         req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
         with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        cached_file.write_text(json.dumps(data), encoding="utf-8")
+            raw = resp.read()
+            data = json.loads(raw, parse_float=Decimal)
+        cached_file.write_bytes(raw)
         time.sleep(self.rate_limit_sleep)
         return data
 
@@ -345,19 +346,16 @@ class EdgarMarketDataProvider:
         Requires exact date equality on trading days. When shares_as_of falls on a
         non-trading US weekend/holiday (verified via SPY tape or statutory NYSE
         calendar), permits a prior trading session close (<= 5 calendar days earlier)
-        only if weekend or explicitly documented with
+        only when explicitly documented with
         prior_trading_day_for_non_trading_cover_date=<shares_as_of>.
         """
-        def _is_valid_prior(price_date: date, ref: str) -> bool:
-            delta = (shares_as_of - price_date).days
-            if not (0 < delta <= 5):
-                return False
-            marker = f"prior_trading_day_for_non_trading_cover_date={shares_as_of.isoformat()}"
-            if shares_as_of.weekday() < 5 and marker not in ref:
-                return False
-            return is_non_trading_cover_date(shares_as_of, self._spy_trading_dates)
+        session = cover_price_session(shares_as_of, self._spy_trading_dates)
+        marker = f"prior_trading_day_for_non_trading_cover_date={shares_as_of.isoformat()}"
 
-        if (ticker, shares_as_of) in self._snapshot_index:
+        def _is_valid_prior(price_date: date, ref: str) -> bool:
+            return price_date == session and price_date < shares_as_of and marker in ref
+
+        if session == shares_as_of and (ticker, shares_as_of) in self._snapshot_index:
             price, ref = self._snapshot_index[(ticker, shares_as_of)]
             if not ref.strip():
                 raise KeyError(f"Ticker {ticker} closing-price snapshot is missing source provenance")
@@ -378,7 +376,7 @@ class EdgarMarketDataProvider:
         if ticker in self.snapshot_prices:
             price_date = self.snapshot_price_dates.get(ticker)
             price_source = self.snapshot_price_source_refs.get(ticker, "").strip()
-            if price_date == shares_as_of or (price_date is not None and _is_valid_prior(price_date, price_source)):
+            if (session == price_date == shares_as_of) or (price_date is not None and _is_valid_prior(price_date, price_source)):
                 if not price_source:
                     raise KeyError(f"Ticker {ticker} closing-price snapshot is missing source provenance")
                 return Decimal(str(self.snapshot_prices[ticker])), price_date, price_source
@@ -453,21 +451,11 @@ class EdgarMarketDataProvider:
         if not by_dt:
             return None
 
-        resolved_dt: date | None = None
-        marker = ""
-        if shares_as_of in by_dt:
-            resolved_dt = shares_as_of
-        else:
-            spy_dates = self._get_spy_trading_dates()
-            if is_non_trading_cover_date(shares_as_of, spy_dates):
-                for offset in range(1, 6):
-                    cand = shares_as_of - timedelta(days=offset)
-                    if cand in by_dt:
-                        resolved_dt = cand
-                        marker = f"; prior_trading_day_for_non_trading_cover_date={shares_as_of.isoformat()}"
-                        break
-        if resolved_dt is None:
+        resolved_dt = cover_price_session(shares_as_of, self._get_spy_trading_dates())
+        if resolved_dt not in by_dt:
             return None
+        marker = (f"; prior_trading_day_for_non_trading_cover_date={shares_as_of.isoformat()}"
+                  if resolved_dt != shares_as_of else "")
         px, base_ref = by_dt[resolved_dt]
         ref = f"{base_ref}{marker}"
         self._snapshot_index[(ticker, resolved_dt)] = (px, ref)
@@ -476,10 +464,17 @@ class EdgarMarketDataProvider:
         self.snapshot_price_source_refs[ticker] = ref
         return px, resolved_dt, ref
 
+    def is_verified_peer(self, ticker: str) -> bool:
+        path = Path(__file__).resolve().parent.parent / "peer_verification.json"
+        catalog = json.loads(path.read_text(encoding="utf-8"))["industries"]
+        return any(p["ticker"] == ticker and p.get("verified") and
+                   p.get("exchange") in {"NYSE", "Nasdaq", "NYSE American", "CBOE"}
+                   for peers in catalog.values() for p in peers)
+
     def get_candidate_peers(self, industry: str) -> list[str]:
         """Return candidate tickers for an industry, prioritizing snapshot-backed peers."""
         ind_key = industry.strip().lower()
-        base = list(candidate_pool().get(ind_key, []))
+        base: list[str] = []
         veri_path = Path(__file__).resolve().parent.parent / "peer_verification.json"
         if veri_path.exists():
             try:
@@ -764,9 +759,17 @@ class EdgarMarketDataProvider:
         gaap = facts.get("us-gaap", {})
         dei = facts.get("dei", {})
 
+        recent = self._get_submissions(cik)["filings"]["recent"]
+        filing_rows = list(zip(recent["form"], recent["reportDate"], recent["accessionNumber"], strict=True))
+        annual = [(end, accn) for form, end, accn in filing_rows if form in ANNUAL_FORMS and end]
+        quarterly = [(end, accn) for form, end, accn in filing_rows if form in QUARTERLY_FORMS and end]
+        if not annual:
+            raise KeyError(f"{ticker} has no verifiable 10-K reporting date in SEC submissions")
+        fy_end = max(annual)[0]
+        latest_q = max(quarterly, default=("", ""))[0]
         if period == "LTM":
-            return self._get_peer_financials_ltm(ticker, gaap, dei)
-        return self._get_peer_financials_fy(ticker, gaap, dei, target_period="FY")
+            return self._get_peer_financials_ltm(ticker, gaap, dei, fy_end, latest_q)
+        return self._get_peer_financials_fy(ticker, gaap, dei, required_end=fy_end)
 
     def _get_peer_financials_fy(
         self,
@@ -776,6 +779,7 @@ class EdgarMarketDataProvider:
         *,
         target_period: str = "FY",
         provenance_note: str = "",
+        required_end: str,
     ) -> list[FinancialDatapoint]:
         # 1. Income statement lines (raw EBITDA inputs)
         inc_units = self._find_annual_units(gaap, TAG_INCOME_CONTINUING)
@@ -809,7 +813,9 @@ class EdgarMarketDataProvider:
         if not common_ends:
             raise KeyError(f"Ticker {ticker} has no common 10-K period_end across income lines")
 
-        latest_end = max(common_ends)
+        if required_end not in common_ends:
+            raise KeyError(f"{ticker} latest 10-K {required_end} lacks complete annual GAAP lines")
+        latest_end = required_end
         inc_data = inc_units[latest_end]
         tax_data = tax_units[latest_end]
         da_data = da_units[latest_end]
@@ -1209,6 +1215,8 @@ class EdgarMarketDataProvider:
         ticker: str,
         gaap: dict[str, Any],
         dei: dict[str, Any],
+        required_fy: str,
+        latest_q: str,
     ) -> list[FinancialDatapoint]:
         """Compute LTM = FY + Curr_YTD - Prior_YTD paired with MRQ balance sheet & shares."""
         inc_fy = self._find_annual_units(gaap, TAG_INCOME_CONTINUING)
@@ -1224,7 +1232,9 @@ class EdgarMarketDataProvider:
         common_fy = set(inc_fy) & set(tax_fy) & set(da_fy)
         if not common_fy:
             raise KeyError(f"Ticker {ticker} missing essential annual 10-K GAAP lines for LTM anchor")
-        fy_end = max(common_fy)
+        if required_fy not in common_fy:
+            raise KeyError(f"{ticker} latest 10-K {required_fy} lacks the LTM anchor")
+        fy_end = required_fy
         fy_end_dt = date.fromisoformat(fy_end)
 
         # Find latest valid cumulative YTD 10-Q / 10-Q/A period strictly after fy_end
@@ -1235,7 +1245,7 @@ class EdgarMarketDataProvider:
                 form = e.get("form")
                 if form not in QUARTERLY_FORMS or fp not in YTD_DAY_RANGES or "start" not in e or not e.get("end"):
                     continue
-                if e["end"] <= fy_end:
+                if e["end"] != latest_q or e["end"] <= fy_end:
                     continue
                 e_dt = date.fromisoformat(e["end"])
                 s_dt = date.fromisoformat(e["start"])
@@ -1244,13 +1254,15 @@ class EdgarMarketDataProvider:
                 if lo <= days <= hi and -7 <= (s_dt - fy_end_dt).days <= 10:
                     q_cands.append((e["end"], e.get("filed", ""), form == "10-Q/A", e.get("accn", ""), fp))
 
+        if latest_q > fy_end and not q_cands:
+            raise KeyError(f"{ticker} latest 10-Q {latest_q} lacks verified cumulative YTD income")
         if not q_cands:
             # 10-K is already more recent than any filed 10-Q (e.g. FY just reported) -> FY equals LTM
             return self._get_peer_financials_fy(
                 ticker,
                 gaap,
                 dei,
-                target_period="LTM",
+                target_period="LTM", required_end=required_fy,
                 provenance_note="LTM equals latest 10-K FY; no subsequent 10-Q period filed",
             )
 
@@ -1271,6 +1283,7 @@ class EdgarMarketDataProvider:
             ):
                 da_ltm = {
                     "tag": "Depreciation+AmortizationOfIntangibleAssets",
+                    "fy_accn": dep_ltm["fy_accn"], "prior_accn": dep_ltm["prior_accn"],
                     "val": dep_ltm["val"] + amo_ltm["val"],
                     "prior_end": dep_ltm["prior_end"],
                     "accn": dep_ltm["accn"],
@@ -1287,13 +1300,13 @@ class EdgarMarketDataProvider:
             int_val = gross_int_ltm["val"]
             int_ref = (
                 f"SEC LTM ({fy_end} + {q_fp} {q_end} - {gross_int_ltm['prior_end']}) "
-                f"accn:{gross_int_ltm['accn']} tag:{gross_int_ltm['tag']}"
+                f"accn:{gross_int_ltm['accn']} FY:{gross_int_ltm['fy_accn']} prior:{gross_int_ltm['prior_accn']} tag:{gross_int_ltm['tag']}"
             )
         elif net_int_ltm:
             int_val = -net_int_ltm["val"]
             int_ref = (
                 f"SEC LTM ({fy_end} + {q_fp} {q_end} - {net_int_ltm['prior_end']}) "
-                f"accn:{net_int_ltm['accn']} tag:{net_int_ltm['tag']} (sign inverted to expense basis)"
+                f"accn:{net_int_ltm['accn']} FY:{net_int_ltm['fy_accn']} prior:{net_int_ltm['prior_accn']} tag:{net_int_ltm['tag']} (sign inverted to expense basis)"
             )
         else:
             raise KeyError(f"Ticker {ticker} is missing matched FY/YTD interest series for LTM {q_end}")
@@ -1366,7 +1379,7 @@ class EdgarMarketDataProvider:
                 period="LTM",
                 period_end=q_date,
                 source_type=SourceType.SEC_FILING,
-                source_ref=f"SEC 10-Q MRQ tags: {', '.join(debt_tags_used) or 'None'}",
+                source_ref=f"SEC 10-Q MRQ accn:{q_accn} tags: {', '.join(debt_tags_used) or 'None'}",
                 retrieved_at=now,
                 peer_ticker=ticker,
             ),
@@ -1386,7 +1399,7 @@ class EdgarMarketDataProvider:
                 period="LTM",
                 period_end=q_date,
                 source_type=SourceType.SEC_FILING,
-                source_ref=f"SEC LTM ({ltm_span}) accn:{inc_ltm['accn']} tag:{inc_ltm['tag']}",
+                source_ref=f"SEC LTM ({ltm_span}) accn:{inc_ltm['accn']} FY:{inc_ltm['fy_accn']} prior:{inc_ltm['prior_accn']} tag:{inc_ltm['tag']}",
                 retrieved_at=now,
                 peer_ticker=ticker,
             ),
@@ -1406,7 +1419,7 @@ class EdgarMarketDataProvider:
                 period="LTM",
                 period_end=q_date,
                 source_type=SourceType.SEC_FILING,
-                source_ref=f"SEC LTM ({ltm_span}) accn:{tax_ltm['accn']} tag:{tax_ltm['tag']}",
+                source_ref=f"SEC LTM ({ltm_span}) accn:{tax_ltm['accn']} FY:{tax_ltm['fy_accn']} prior:{tax_ltm['prior_accn']} tag:{tax_ltm['tag']}",
                 retrieved_at=now,
                 peer_ticker=ticker,
             ),
@@ -1416,7 +1429,7 @@ class EdgarMarketDataProvider:
                 period="LTM",
                 period_end=q_date,
                 source_type=SourceType.SEC_FILING,
-                source_ref=f"SEC LTM ({ltm_span}) accn:{da_ltm['accn']} tag:{da_ltm['tag']}",
+                source_ref=f"SEC LTM ({ltm_span}) accn:{da_ltm['accn']} FY:{da_ltm['fy_accn']} prior:{da_ltm['prior_accn']} tag:{da_ltm['tag']}",
                 retrieved_at=now,
                 peer_ticker=ticker,
             ),
@@ -1508,7 +1521,7 @@ class EdgarMarketDataProvider:
                     period="LTM",
                     period_end=q_date,
                     source_type=SourceType.SEC_FILING,
-                    source_ref=f"SEC 10-Q MRQ tag:{assets_mrq['tag']}",
+                    source_ref=f"SEC 10-Q MRQ accn:{q_accn} tag:{assets_mrq['tag']}",
                     retrieved_at=now,
                     peer_ticker=ticker,
                 )
@@ -1522,7 +1535,7 @@ class EdgarMarketDataProvider:
                     period="LTM",
                     period_end=q_date,
                     source_type=SourceType.SEC_FILING,
-                    source_ref=f"SEC 10-Q MRQ tag:{equity_mrq['tag']}",
+                    source_ref=f"SEC 10-Q MRQ accn:{q_accn} tag:{equity_mrq['tag']}",
                     retrieved_at=now,
                     peer_ticker=ticker,
                 )

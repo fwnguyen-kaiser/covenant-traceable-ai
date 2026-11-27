@@ -140,8 +140,10 @@ def build_fact_pack(state: ValuationState) -> LockedFactPack:
             put("target_ebitda_margin_pct", fmt_pct(t_margin), "Target normalized EBITDA margin %", t_margin)
 
     if profile is not None:
-        put("target_total_debt", fmt_usd(profile.total_debt), "Target total debt", profile.total_debt)
-        put("target_cash", fmt_usd(profile.cash), "Target cash balance", profile.cash)
+        if profile.total_debt is not None:
+            put("target_total_debt", fmt_usd(profile.total_debt), "Target total debt", profile.total_debt)
+        if profile.cash is not None:
+            put("target_cash", fmt_usd(profile.cash), "Target cash balance", profile.cash)
         if profile.customer_concentration_pct is not None:
             put("target_customer_concentration_pct", fmt_pct(profile.customer_concentration_pct), "Largest customer share of revenue %", profile.customer_concentration_pct)
         if profile.revenue_growth_pct is not None:
@@ -262,10 +264,12 @@ def build_fact_pack(state: ValuationState) -> LockedFactPack:
     required_risks: list[str] = []
     if profile and profile.customer_concentration_pct is not None and profile.customer_concentration_pct >= Decimal("25"):
         required_risks.append("customer_concentration")
-    if "ev_low" in val and "target_net_debt" in val:
+    if val.get("ev_low") is not None and val.get("target_net_debt") is not None:
         if Decimal(str(val["target_net_debt"])) > 0 and Decimal(str(val["target_net_debt"])) >= Decimal(str(val["ev_low"])):
             required_risks.append("high_leverage_distressed")
-    if any("size" in lim.lower() or "smaller" in lim.lower() for lim in limitations):
+    if "nci_material" in (val.get("risk_codes") or []):
+        required_risks.append("nci_material")
+    if any(lim.startswith("LMM Size-Tier Spread Note") for lim in limitations):
         required_risks.append("lmm_size_spread")
     if len(multiples) < 5:
         required_risks.append("small_peer_count")

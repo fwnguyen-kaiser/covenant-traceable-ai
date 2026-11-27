@@ -33,11 +33,15 @@ htmlcov/
 
 # Large reference source and local Markdown notes/plans (kept untracked on disk).
 *.md
-!README.md
-docs/IB.pdf
+!/README.md
+docs/*
+!docs/covenant-erd.mmd
 
 # Downloaded SEC payload cache
 ai/src/covenant_ai/.edgar_cache/
 
 # Local historical closing-price input; the header template stays tracked.
 ai/market_price_snapshots.csv
+
+# Reviewer enrollment is specific to this Windows installation.
+ai/.covenant-reviewer

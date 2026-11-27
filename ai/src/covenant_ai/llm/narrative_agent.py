@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from covenant_ai.llm.client import LLMClient
+from covenant_ai.llm.client import LLMClient, require_local_client
 from covenant_ai.llm.fact_pack import LockedFactPack, render_fact_placeholders
 from covenant_ai.llm.prompts import EXPLAIN_SYSTEM_PROMPT, PROMPT_VERSION_EXPLAIN
 from covenant_ai.llm.schemas import NarrativeDraft
@@ -89,6 +89,7 @@ def draft_hybrid_narrative(
     Returns (raw_template_md, rendered_md, unknown_placeholder_keys, prompt_version).
     """
     prompt = _build_explain_user_prompt(fact_pack, state, prior_findings=prior_findings)
+    require_local_client(client)
     draft = client.generate_structured(
         prompt=prompt,
         system_prompt=EXPLAIN_SYSTEM_PROMPT,

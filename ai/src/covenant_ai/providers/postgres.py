@@ -94,6 +94,21 @@ class PostgresMarketDataProvider:
         from covenant_ai.domain.industry import candidate_pool
         return candidate_pool().get(ind_key, [])
 
+    def is_verified_peer(self, ticker: str) -> bool:
+        try:
+            with psycopg.connect(self.db_url, connect_timeout=3) as conn:
+                row = conn.execute(
+                    "SELECT verified, exchange FROM peer_companies WHERE ticker=%s", (ticker,)
+                ).fetchone()
+                if row:
+                    return bool(row[0] and row[1] in {"NYSE", "Nasdaq", "NYSE American", "CBOE"})
+                if conn.execute("SELECT EXISTS (SELECT 1 FROM peer_companies)").fetchone()[0]:
+                    return False
+        except psycopg.OperationalError:
+            if not self.fallback_to_edgar:
+                raise
+        return self.fallback_to_edgar and self._get_edgar().is_verified_peer(ticker)
+
     def get_peer_financials(self, ticker: str, period: str = "FY") -> list[FinancialDatapoint]:
         ticker = ticker.upper().strip()
         norm_period = period.strip().upper()
@@ -111,7 +126,9 @@ class PostgresMarketDataProvider:
                         SELECT id, metric, value, currency, period, period_end,
                                source_type, source_ref, retrieved_at
                         FROM financial_datapoints
-                        WHERE peer_ticker = %s
+                        JOIN peer_companies pc ON pc.ticker=financial_datapoints.peer_ticker
+                        WHERE peer_ticker = %s AND pc.verified
+                          AND (financial_datapoints.baseline_id IS NOT DISTINCT FROM pc.baseline_id OR source_type='user_provided')
                           AND period = %s
                           AND run_id IS NULL
                         ORDER BY metric;
@@ -119,6 +136,13 @@ class PostgresMarketDataProvider:
                         (ticker, norm_period),
                     )
                     rows = cur.fetchall()
+                    if not rows:
+                        error = cur.execute(
+                            "SELECT baseline_errors->>%s FROM peer_companies WHERE ticker=%s AND verified",
+                            (norm_period, ticker)
+                        ).fetchone()
+                        if error:
+                            raise KeyError(error[0] or f"No current {norm_period} baseline for {ticker}")
                     for r in rows:
                         pts.append(
                             FinancialDatapoint(
@@ -134,7 +158,7 @@ class PostgresMarketDataProvider:
                                 retrieved_at=r[8] if r[8] else datetime.now(UTC),
                             )
                         )
-        except Exception as exc:
+        except psycopg.OperationalError as exc:
             logger.warning("Peer DB lookup failed for ticker %s: %s", ticker, exc)
 
         if pts:
@@ -166,12 +190,13 @@ class PostgresMarketDataProvider:
                         FROM peer_companies pc
                         LEFT JOIN financial_datapoints fd
                           ON fd.peer_ticker = pc.ticker
+                         AND (fd.baseline_id IS NOT DISTINCT FROM pc.baseline_id OR fd.source_type='user_provided')
                          AND fd.run_id IS NULL
                          AND fd.period = %s
                         WHERE pc.industry = %s
                           AND pc.verified = TRUE
                           AND (%s OR COALESCE(pc.ev_ebitda_eligible, TRUE) = TRUE)
-                        ORDER BY pc.ticker;
+                        ORDER BY pc.ticker, fd.metric, CASE fd.source_type WHEN 'user_provided' THEN 3 WHEN 'sec_filing' THEN 2 ELSE 1 END, fd.period_end NULLS FIRST, fd.retrieved_at, fd.id;
                         """,
                         (norm_period, ind_key, include_ev_sales_only),
                     )
@@ -201,11 +226,11 @@ class PostgresMarketDataProvider:
                             rev = m.get("revenue")
                             gp = m.get("gross_profit")
                             mcap = m.get("market_cap")
-                            debt = m.get("total_debt", Decimal(0))
-                            cash = m.get("cash", Decimal(0))
+                            debt = m.get("total_debt")
+                            cash = m.get("cash")
                             pref = m.get("preferred_equity", Decimal(0))
                             nci = m.get("non_controlling_interests", Decimal(0))
-                            ev = (mcap + debt + pref + nci - cash) if mcap is not None else None
+                            ev = (mcap + debt + pref + nci - cash) if None not in (mcap, debt, cash) else None
                             ebit = None
                             ebitda = None
                             if all(k in m for k in ("income_continuing_ops", "interest_expense_net", "income_tax_expense")):
@@ -221,7 +246,7 @@ class PostgresMarketDataProvider:
                             gp_margin = (gp / rev) if gp is not None and rev and rev > 0 else None
                             capex = m.get("capex")
                             capex_rev = (capex / rev) if capex is not None and rev and rev > 0 else None
-                            nd_eb = ((debt - cash) / ebitda) if ebitda and ebitda > 0 else None
+                            nd_eb = ((debt - cash) / ebitda) if ebitda and ebitda > 0 and debt is not None and cash is not None else None
 
                             roic = None
                             equity = m.get("total_equity")

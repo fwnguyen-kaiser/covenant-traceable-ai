@@ -136,7 +136,7 @@ def build_peer_financials(
         revenue=rev_val,
     )
     used_ids = [d.id for d in got.values() if d is not None]
-    if rev_result.datapoint is not None:
+    if rev_val is not None:
         used_ids.append(rev_result.datapoint.id)
     return peer, used_ids
 

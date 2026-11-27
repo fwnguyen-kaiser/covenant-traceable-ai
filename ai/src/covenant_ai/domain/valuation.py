@@ -7,6 +7,7 @@ from .errors import (
 )
 from .models import PeerFinancials, ValuationResult
 
+MIN_PUBLIC_EV = Decimal("100000000")
 MIN_PEERS = 3  # hard minimum to compute a range
 RECOMMENDED_PEERS = 5  # below this, a limitation is added to the result
 OUTLIER_IQR_FACTOR = Decimal("1.5")
@@ -104,6 +105,17 @@ def find_outliers(multiples: dict[str, Decimal]) -> dict[str, str]:
     return flags
 
 
+def public_peer_exclusion(peer: PeerFinancials) -> str | None:
+    if peer.ebitda <= 0:
+        return "non-positive EBITDA"
+    ev = enterprise_value(peer)
+    if ev <= 0:
+        return "non-positive EV"
+    if ev < MIN_PUBLIC_EV:
+        return "EV below USD 100 million public comparable floor"
+    return None
+
+
 def indicative_valuation(
     target_ebitda: Decimal,
     target_period: str,
@@ -111,8 +123,8 @@ def indicative_valuation(
     low_q: Decimal = Decimal("0.25"),
     high_q: Decimal = Decimal("0.75"),
     target_revenue: Decimal | None = None,
-    target_debt: Decimal = Decimal(0),
-    target_cash: Decimal = Decimal(0),
+    target_debt: Decimal | None = None,
+    target_cash: Decimal | None = None,
 ) -> ValuationResult:
     if target_ebitda <= 0:
         raise NonPositiveTargetEbitdaError(
@@ -156,10 +168,13 @@ def indicative_valuation(
     ev_high = percentile(values, high_q) * target_ebitda
 
     # Implied Equity Value Range (Equity Value = EV - Debt + Cash)
-    target_net_debt = target_debt - target_cash
-    equity_low = max(Decimal(0), ev_low - target_net_debt)
-    equity_mid = max(Decimal(0), ev_mid - target_net_debt)
-    equity_high = max(Decimal(0), ev_high - target_net_debt)
+    target_net_debt = target_debt - target_cash if target_debt is not None and target_cash is not None else None
+
+    def equity(ev: Decimal) -> Decimal | None:
+        return max(Decimal(0), ev - target_net_debt) if target_net_debt is not None else None
+    equity_low = equity(ev_low)
+    equity_mid = equity(ev_mid)
+    equity_high = equity(ev_high)
 
     # Wall Street Comps Peer Group Summary Statistics
     peer_stats: dict[str, dict[str, Decimal]] = {}
@@ -175,7 +190,7 @@ def indicative_valuation(
     }
 
     # Secondary multiple: EV/Sales sanity check benchmark
-    implied_ev_by_sales: dict[str, Decimal] = {}
+    implied_ev_by_sales: dict[str, Decimal | None] = {}
     if target_revenue is not None and target_revenue > 0 and len(sales_multiples) >= MIN_PEERS:
         sales_vals = list(sales_multiples.values())
         sorted_sales = sorted(sales_vals)
@@ -195,9 +210,9 @@ def indicative_valuation(
             "ev_low": s_ev_low,
             "ev_mid": s_ev_mid,
             "ev_high": s_ev_high,
-            "equity_low": max(Decimal(0), s_ev_low - target_net_debt),
-            "equity_mid": max(Decimal(0), s_ev_mid - target_net_debt),
-            "equity_high": max(Decimal(0), s_ev_high - target_net_debt),
+            "equity_low": equity(s_ev_low),
+            "equity_mid": equity(s_ev_mid),
+            "equity_high": equity(s_ev_high),
             "multiple_p25": percentile(sales_vals, low_q),
             "multiple_median": percentile(sales_vals, Decimal("0.5")),
             "multiple_p75": percentile(sales_vals, high_q),
@@ -219,7 +234,9 @@ def indicative_valuation(
         )
 
     # Distressed / High Leverage Capital Structure detection
-    if target_net_debt > 0 and target_net_debt >= ev_low:
+    if target_net_debt is None:
+        limitations.append("Equity value is unavailable until both target debt and cash are supplied.")
+    elif target_net_debt > 0 and target_net_debt >= ev_low:
         if target_net_debt >= ev_high:
             limitations.append(
                 f"Distressed Capital Structure: Target net debt (${target_net_debt:,.2f}) exceeds the entire implied Enterprise Value range (${ev_low:,.2f} - ${ev_high:,.2f}). Common equity value is effectively impaired ($0.00) under standard multiple exit scenarios; debt restructuring or recapitalization is recommended."

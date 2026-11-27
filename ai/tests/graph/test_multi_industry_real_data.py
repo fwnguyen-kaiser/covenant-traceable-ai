@@ -24,6 +24,7 @@ def test_e2e_workflow_restaurants_industry():
     config = {"configurable": {"thread_id": "case-restaurants-real"}}
 
     intake_answers = {
+        "ebitda_period": "FY",
         "company_name": "Bella Italia Casual Dining",
         "business_description": "Regional Italian casual dining franchise with 12 locations.",
         "industry": Industry.RESTAURANTS.value,
@@ -77,6 +78,7 @@ def test_e2e_workflow_packaged_foods_with_negative_ebitda_peer():
     config = {"configurable": {"thread_id": "case-packaged-foods-cag-negative"}}
 
     intake_answers = {
+        "ebitda_period": "FY",
         "company_name": "Artisan Harvest Organics",
         "business_description": "Producer of organic pantry staples and packaged snacks.",
         "industry": Industry.PACKAGED_FOODS.value,
@@ -94,7 +96,8 @@ def test_e2e_workflow_packaged_foods_with_negative_ebitda_peer():
 
     # HAIN has negative GAAP EBITDA and a valid exact-date market cap snapshot.
     peers = ["CPB", "HAIN", "FLO", "JJSF", "POST"]
-    final = app.invoke(Command(resume=peers), config=config)
+    reasons = {t: "Packaged food manufacturer serving retail channels" for t in peers}
+    final = app.invoke(Command(resume={"approved_peers": peers, "rationale": reasons}), config=config)
 
     assert "__interrupt__" not in final
     assert final.get("valuation") is not None
@@ -117,6 +120,7 @@ def test_e2e_workflow_apparel_footwear_industry():
     config = {"configurable": {"thread_id": "case-apparel-real"}}
 
     intake_answers = {
+        "ebitda_period": "FY",
         "company_name": "ProFit Performance Wear",
         "business_description": "Technical activewear and athletic apparel brand.",
         "industry": Industry.APPAREL_FOOTWEAR.value,
@@ -152,6 +156,7 @@ def test_e2e_workflow_logistics_freight_industry():
     config = {"configurable": {"thread_id": "case-logistics-real"}}
 
     intake_answers = {
+        "ebitda_period": "FY",
         "company_name": "Midwest Express Freight LLC",
         "business_description": "Regional Less-Than-Truckload (LTL) and freight broker.",
         "industry": Industry.LOGISTICS_FREIGHT.value,

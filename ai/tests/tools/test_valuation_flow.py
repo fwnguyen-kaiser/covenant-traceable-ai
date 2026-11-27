@@ -19,7 +19,8 @@ def with_raw_ebitda(data, da_ratio=Decimal("0.1")):
             income_tax_expense=Decimal(0),
             depreciation_amortization=da,
         )
-        out[ticker] = m
+        # Source fixture amounts are in ten millions of USD. Multiples stay unchanged.
+        out[ticker] = {key: value * Decimal("10000000") for key, value in m.items()}
     return out
 
 

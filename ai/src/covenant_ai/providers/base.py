@@ -17,6 +17,8 @@ class MarketDataProvider(Protocol):
     It may also return optional metrics (preferred_equity, non_controlling_interests).
     Raises KeyError or a provider-specific exception when the ticker is unknown.
     """
+    def is_verified_peer(self, ticker: str) -> bool: ...
+
     def get_peer_financials(
         self, ticker: str, period: str
     ) -> list[FinancialDatapoint]: ...

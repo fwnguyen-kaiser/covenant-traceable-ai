@@ -1,7 +1,7 @@
 """Gemini-safe Pydantic structured output schemas (list-based, no dict[k, v])."""
 from __future__ import annotations
 
-from decimal import Decimal
+from covenant_ai.domain.amounts import parse_amount
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -29,19 +29,7 @@ def _coerce_decimal_str(value: object) -> str | None:
     """Validate financial quantities as exact Decimal strings (FIN-01; never IEEE-754 float)."""
     if value is None:
         return None
-    if isinstance(value, bool):
-        raise ValueError("Boolean value is not valid for a numeric field.")
-    if isinstance(value, float):
-        # Accept float inputs only via explicit str() if supplied in legacy test dicts
-        s = repr(value)
-    else:
-        s = str(value)
-    cleaned = s.strip().replace("$", "").replace(",", "").rstrip("%").strip()
-    if not cleaned:
-        return None
-    # Verify exact parseability into Decimal right at schema boundary
-    Decimal(cleaned)
-    return cleaned
+    return str(parse_amount(value))
 
 
 class ExtractedAdjustmentItem(BaseModel):

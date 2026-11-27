@@ -14,10 +14,13 @@ from typing import Any
 
 from langgraph.types import interrupt
 
-from covenant_ai.domain.bridge import build_peer_financials
+from covenant_ai.domain.bridge import build_peer_financials, flag_peer
+from covenant_ai.domain.models import FinancialDatapoint, SourceType
+from datetime import datetime, UTC
 from covenant_ai.domain.errors import MissingFieldError, ValuationError
 from covenant_ai.domain.industry import Industry, candidate_pool, is_valid_sub_industry
 from covenant_ai.domain.intake import create_company_profile_from_intake
+from covenant_ai.domain.intake_questions import missing_required
 from covenant_ai.domain.models import (
     AuditVerdict,
     CompanyProfile,
@@ -34,6 +37,7 @@ from covenant_ai.domain.screening import (
 )
 from covenant_ai.domain.valuation import (
     MIN_PEERS,
+    public_peer_exclusion,
     enterprise_value,
     find_outliers,
     indicative_valuation,
@@ -121,8 +125,15 @@ def make_intake_node(llm_client: LLMClient | None = None):
                 )
             )
             intake_answers = json_answers
-        elif intake_answers and profile is None:
-            profile, schedule = create_company_profile_from_intake(intake_answers)
+        elif intake_answers is not None and profile is None:
+            try:
+                profile, schedule = create_company_profile_from_intake(intake_answers)
+            except ValueError as exc:
+                missing = missing_required(intake_answers)
+                return {"clarify_needed": True, "clarify_payload": {
+                    "action": "intake_clarify", "structured": True, "error": str(exc),
+                    "missing_fields": [q.id for q in missing], "questions": [q.prompt for q in missing],
+                }}
             ledger_updates.extend(
                 schedule.to_datapoints(
                     period=profile.ebitda_period,
@@ -158,6 +169,21 @@ def make_intake_node(llm_client: LLMClient | None = None):
                 )
             )
 
+        # Capture the inputs used by sales and equity bridges, including explicit zero.
+        for metric in ("revenue", "total_debt", "cash"):
+            value = getattr(profile, metric)
+            if value is not None:
+                evidence = profile.inference_provenance.get(metric)
+                ref = evidence.evidence_quote if evidence and evidence.quote_verified else f"Target intake field {metric}"
+                ledger_updates.append(FinancialDatapoint(
+                    metric=metric, value=value, period=profile.ebitda_period, period_end=profile.period_end_date,
+                    source_type=SourceType.USER_PROVIDED, source_ref=ref, retrieved_at=datetime.now(UTC),
+                ))
+        for dp in ledger_updates:
+            evidence = profile.inference_provenance.get("ebitda")
+            if dp.metric == "reported_ebitda" and evidence and evidence.quote_verified:
+                dp.source_ref = evidence.evidence_quote
+
         inconsistencies = list(dict.fromkeys([*inconsistencies, *profile.inconsistencies]))
         if profile.inference_provenance and not prov_json:
             prov_json = {k: v.model_dump(mode="json") for k, v in profile.inference_provenance.items()}
@@ -166,6 +192,7 @@ def make_intake_node(llm_client: LLMClient | None = None):
 
         out: dict[str, Any] = {
             "company_profile": profile,
+            "integrity_version": 2,
             "target_ebitda": profile.ebitda,
             "target_period": profile.ebitda_period,
             "industry_enum": proposed_industry,
@@ -204,6 +231,9 @@ def intake_clarify_node(state: ValuationState) -> dict[str, Any]:
         locked_prev = dict(state.get("locked_intake_fields") or {})
         clarify_count = int(state.get("intake_clarify_count") or 0) + 1
 
+        if payload.get("structured") and not isinstance(res, dict):
+            payload = {**payload, "error": "Supply corrected fields as a JSON object."}
+            continue
         if isinstance(res, dict):
             msg = str(res.get("text") or res.get("answer") or res.get("message") or "").strip()
             has_structured = False
@@ -323,6 +353,7 @@ def confirm_industry_node(state: ValuationState) -> dict[str, Any]:
                 updates["inconsistencies"] = list(
                     dict.fromkeys([*(state.get("inconsistencies") or []), *notes])
                 )
+            updates["review_decisions"] = [*(state.get("review_decisions") or []), {"action": "industry_confirmed", "decision": confirmed}]
             return updates
         payload = {**payload, "error": f"Unsupported industry: {confirmed!r}"}
 
@@ -444,6 +475,7 @@ def peer_review_node(state: ValuationState) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "action": "peer_review",
         "selected_peers": current,
+        "candidate_tickers": state.get("candidate_tickers") or [],
         "peer_scores": [r for r in screening_rows if r.get("ticker") in set(current)][:10] or screening_rows[:10],
         "min_required": MIN_PEERS,
     }
@@ -461,10 +493,18 @@ def peer_review_node(state: ValuationState) -> dict[str, Any]:
         else:
             approved = _clean_tickers(current)
 
+        outside = set(approved) - set(state.get("candidate_tickers") or [])
+        rationale = res.get("rationale", {}) if isinstance(res, dict) else {}
+        if len(approved) >= MIN_PEERS and outside and (not isinstance(rationale, dict) or any(not str(rationale.get(t) or "").strip() for t in outside)):
+            payload = {**payload, "error": "Supply a business rationale for each outside-industry peer.",
+                       "requires_rationale": sorted(outside)}
+            continue
         if len(approved) >= MIN_PEERS:
             return {
                 "selected_peers": approved,
+                "peer_review_rationale": {t: str(rationale[t]) for t in sorted(outside)},
                 "peer_review_confirmed": True,
+                "review_decisions": [*(state.get("review_decisions") or []), {"action": "peers_reviewed", "decision": approved}],
             }
         payload = {
             **payload,
@@ -509,10 +549,9 @@ def compute_node(state: ValuationState) -> dict[str, Any]:
     for ticker in state.get("selected_peers", []):
         try:
             peer, _ = build_peer_financials(ledger, ticker, period)
-            if peer.ebitda <= 0:
-                failed_peers[ticker] = "non-positive EBITDA"
-            elif enterprise_value(peer) <= 0:
-                failed_peers[ticker] = "non-positive EV"
+            reason = public_peer_exclusion(peer)
+            if reason:
+                failed_peers[ticker] = reason
             else:
                 valid_peers.append(peer)
         except MissingFieldError as e:
@@ -622,8 +661,8 @@ def valuation_node(state: ValuationState) -> dict[str, Any]:
     target_period = target_period or "FY"
 
     target_revenue = None
-    target_debt = Decimal(0)
-    target_cash = Decimal(0)
+    target_debt = None
+    target_cash = None
     profile = state.get("company_profile")
     if profile:
         target_revenue = profile.revenue
@@ -640,6 +679,20 @@ def valuation_node(state: ValuationState) -> dict[str, Any]:
         target_cash=target_cash,
     )
 
+    result.peer_flags = {p.ticker: flags for p in peers if (flags := flag_peer(p))}
+    for ticker, flags in result.peer_flags.items():
+        for reason in flags.values():
+            result.limitations.append(f"{ticker}: {reason}")
+    dates = [p.market_cap_date for p in peers if p.market_cap_date]
+    if dates:
+        result.price_date_range = (min(dates), max(dates))
+        result.limitations.append(f"Peer cover-date prices span {min(dates)} to {max(dates)}.")
+    result.risk_codes = [code for code, applies in (
+        ("nci_material", bool(result.peer_flags)),
+        ("small_peer_count", len(result.multiples_used) < 5),
+        ("excluded_or_failed_peers", bool(state.get("failed_peers"))),
+        ("equity_inputs_missing", result.target_net_debt is None),
+    ) if applies]
     if profile is not None:
         peer_evs = {
             p.ticker: enterprise_value(p)
@@ -648,11 +701,13 @@ def valuation_node(state: ValuationState) -> dict[str, Any]:
         }
         lmm_note = build_lmm_size_spread_note(profile, result.ev_mid, peer_evs)
         if lmm_note:
+            result.risk_codes.append("lmm_size_spread")
             result.limitations.append(lmm_note)
         if (
             profile.customer_concentration_pct is not None
             and profile.customer_concentration_pct >= Decimal("25")
         ):
+            result.risk_codes.append("customer_concentration")
             result.limitations.append(
                 f"Customer Concentration Risk: Single largest customer accounts for "
                 f"{profile.customer_concentration_pct}% of revenue (>= 25% concentration threshold)."
@@ -720,7 +775,7 @@ def _build_report_body_lines(state: ValuationState) -> tuple[str, list[str]]:
         f"- **Primary Metric (EV/EBITDA)**: Implied EV Range: **{_fmt_money(ev_low)}** – **{_fmt_money(ev_high)}** (Midpoint: **{_fmt_money(ev_mid)}**)",
     ]
 
-    if profile and (profile.total_debt != Decimal(0) or profile.cash != Decimal(0)):
+    if profile and profile.total_debt is not None and profile.cash is not None:
         lines.append(
             f"- **Implied Equity Value (Net of Debt & Cash)**: **{_fmt_money(equity_low)}** – **{_fmt_money(equity_high)}** (Midpoint: **{_fmt_money(equity_mid)}**)"
         )
@@ -744,7 +799,7 @@ def _build_report_body_lines(state: ValuationState) -> tuple[str, list[str]]:
         lines.append(
             f"- **Secondary Benchmark (EV/Sales)**: Implied EV Range: **{_fmt_money(s_low)}** – **{_fmt_money(s_high)}** (Midpoint: **{_fmt_money(s_mid)}**)"
         )
-        if s_eq_mid is not None and profile and (profile.total_debt != Decimal(0) or profile.cash != Decimal(0)):
+        if s_eq_mid is not None and profile and profile.total_debt is not None and profile.cash is not None:
             lines.append(
                 f"  *(Implied Equity Value by EV/Sales: {_fmt_money(implied_sales.get('equity_low'))} – {_fmt_money(implied_sales.get('equity_high'))}, Midpoint: {_fmt_money(s_eq_mid)})*"
             )
@@ -779,7 +834,8 @@ def _build_report_body_lines(state: ValuationState) -> tuple[str, list[str]]:
         for peer in (state.get("peer_financials") or [])
     }
     for ticker, m in multiples.items():
-        flag_str = outlier_flags.get(ticker, "None")
+        flags = [outlier_flags.get(ticker), *(val.get("peer_flags", {}).get(ticker, {}).values())]
+        flag_str = " / ".join(f for f in flags if f) or "None"
         m_val = Decimal(str(m))
         sm_str = f"{Decimal(str(sales_multiples[ticker])):.2f}x" if ticker in sales_multiples else "N/A"
         peer_period_end, market_cap_date, _ = peer_dates.get(ticker, (None, None, None))
@@ -1022,6 +1078,8 @@ def make_self_audit_node(llm_client: LLMClient | None = None):
             for f in findings:
                 if f.rule == "semantic_audit_unavailable":
                     inconsistencies.append(f.message)
+                    narrative_md = build_deterministic_takeaways(fact_pack)
+                    fallback_used = True
             inconsistencies = list(dict.fromkeys(inconsistencies))
 
             if verdict == AuditVerdict.FAIL:
@@ -1074,6 +1132,8 @@ def make_self_audit_node(llm_client: LLMClient | None = None):
                 "explanation": final_md,
                 "audit_verdict": verdict.value,
                 "audit_findings": findings_dicts,
+                "narrative_md": narrative_md,
+                "audit_fallback_used": fallback_used,
                 "needs_audit_retry": False,
                 "inconsistencies": inconsistencies,
             }

@@ -45,7 +45,13 @@ def build_tools(provider: MarketDataProvider) -> list[BaseTool]:
                 ),
             )
         else:
-            result = run_valuation(state.get("ledger", []), ebitda, period, tickers)
+            profile = state.get("company_profile")
+            result = run_valuation(
+                state.get("ledger", []), ebitda, period, tickers,
+                target_revenue=profile.revenue if profile else None,
+                target_debt=profile.total_debt if profile else None,
+                target_cash=profile.cash if profile else None,
+            )
 
         update: dict = {"messages": [_msg(result, runtime)]}
         if result.ok:

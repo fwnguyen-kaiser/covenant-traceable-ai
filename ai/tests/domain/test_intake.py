@@ -152,6 +152,7 @@ def test_create_company_profile_missing_required_raises():
 def test_create_company_profile_wires_qualitative_and_risk_fields():
     answers = {
         "company_name": "Vertical Cloud LLC",
+        "ebitda_period": "FY",
         "business_description": "Recurring SaaS workflow tools for mid-market logistics",
         "industry": Industry.APPLICATION_SOFTWARE.value,
         "geography": "US",
