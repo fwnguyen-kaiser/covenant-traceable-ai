@@ -318,9 +318,23 @@ window.CovenantApp = (function () {
       document.getElementById("report-meta").textContent =
         "Status: " + pkt.review_status.toUpperCase() +
         " | Audit: " + String(pkt.audit_verdict || "").toUpperCase() +
-        " | Method: " + pkt.method_version +
+        " | Method: " + (pkt.method_version || "unrecorded") +
         " | SHA-256: " + pkt.digest;
       document.getElementById("report-md").textContent = pkt.explanation || "";
+      const notices = document.getElementById("report-notices");
+      const items = [...(pkt.review_notices || [])];
+      for (const [ticker, failure] of Object.entries(pkt.screening_failures || {})) {
+        items.push(ticker + " (screening): " + failure.message);
+      }
+      for (const [ticker, reason] of Object.entries(pkt.failed_peers || {})) {
+        items.push(ticker + " (valuation): " + reason);
+      }
+      notices.querySelector("ul").replaceChildren(...items.map(message => {
+        const li = document.createElement("li");
+        li.textContent = message;
+        return li;
+      }));
+      notices.hidden = items.length === 0;
       document.getElementById("report-exports").innerHTML =
         '<a class="btn btn-secondary" href="/api/runs/' + runId + '/exports/xlsx">Download Excel (.xlsx)</a> ' +
         '<a class="btn btn-secondary" href="/api/runs/' + runId + '/exports/md">Markdown</a> ' +

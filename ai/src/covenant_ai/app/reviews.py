@@ -15,6 +15,7 @@ from covenant_ai.app.errors import (
     RunNotFoundError,
     ValidationAppError,
 )
+from covenant_ai.domain.evidence import inspect_v2_packet_remediation_warnings
 from covenant_ai.providers.postgres_repo import PostgresCaseRepository, packet_sha256_digest
 
 
@@ -398,3 +399,13 @@ class ReviewService:
             }
             for r in rows
         ]
+
+    def get_v2_remediation_notices(
+        self,
+        thread_id: str,
+        *,
+        actor: ActorContext | None = None,
+    ) -> list[str]:
+        """Return non-mutating remediation warnings for a stored cover-gaap-v2 packet."""
+        pkt = self.get_frozen_packet(thread_id, actor=actor)
+        return inspect_v2_packet_remediation_warnings(pkt)

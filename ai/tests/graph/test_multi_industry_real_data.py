@@ -48,7 +48,7 @@ def test_e2e_workflow_restaurants_industry():
     assert "__interrupt__" in s2
 
     # 3. Peer Review
-    peers = ["YUM", "SBUX", "BJRI"]
+    peers = ["YUM", "DRI", "BJRI"]
     final = app.invoke(Command(resume=peers), config=config)
 
     assert "__interrupt__" not in final
@@ -63,7 +63,7 @@ def test_e2e_workflow_restaurants_industry():
     # Explanation contains pitchbook tables and stats
     exp = final["explanation"]
     assert "Bella Italia Casual Dining" in str(final["company_profile"])
-    assert "YUM" in exp and "SBUX" in exp and "BJRI" in exp
+    assert "YUM" in exp and "DRI" in exp and "BJRI" in exp
     assert "Benchmark Statistics" in exp
     assert "Private Company Marketability & Liquidity Sensitivity" not in exp
     assert "No private-company size, liquidity, or marketability discount" in exp
@@ -95,7 +95,7 @@ def test_e2e_workflow_packaged_foods_with_negative_ebitda_peer():
     app.invoke(Command(resume=Industry.PACKAGED_FOODS.value), config=config)
 
     # HAIN has negative GAAP EBITDA and a valid exact-date market cap snapshot.
-    peers = ["CPB", "HAIN", "FLO", "JJSF", "POST"]
+    peers = ["CPB", "HAIN", "FLO", "GIS", "POST"]
     reasons = {t: "Packaged food manufacturer serving retail channels" for t in peers}
     final = app.invoke(Command(resume={"approved_peers": peers, "rationale": reasons}), config=config)
 
@@ -135,13 +135,13 @@ def test_e2e_workflow_apparel_footwear_industry():
 
     app.invoke({"intake_answers": intake_answers}, config=config)
     app.invoke(Command(resume=Industry.APPAREL_FOOTWEAR.value), config=config)
-    final = app.invoke(Command(resume=["CROX", "DECK", "PVH", "CRI", "KTB"]), config=config)
+    final = app.invoke(Command(resume=["WWW", "PVH", "CRI", "KTB", "OXM"]), config=config)
 
     assert "__interrupt__" not in final
     assert final.get("valuation") is not None
     val = final["valuation"]
 
-    for t in ["CROX", "DECK", "PVH", "CRI", "KTB"]:
+    for t in ["WWW", "PVH", "CRI", "KTB", "OXM"]:
         assert t in val["multiples_used"]
 
     # EV/Sales secondary multiple calculated for all 5
@@ -172,7 +172,7 @@ def test_e2e_workflow_logistics_freight_industry():
 
     app.invoke({"intake_answers": intake_answers}, config=config)
     app.invoke(Command(resume=Industry.LOGISTICS_FREIGHT.value), config=config)
-    final = app.invoke(Command(resume=["ODFL", "XPO", "SAIA", "WERN", "HTLD"]), config=config)
+    final = app.invoke(Command(resume=["SAIA", "KNX", "WERN", "HTLD", "LSTR"]), config=config)
 
     assert "__interrupt__" not in final
     assert final.get("valuation") is not None
@@ -185,7 +185,7 @@ def test_e2e_workflow_logistics_freight_industry():
     ledger = final["ledger"]
     assert len(ledger) > 0
     tickers_in_ledger = {d.peer_ticker for d in ledger if d.peer_ticker}
-    assert {"ODFL", "XPO", "SAIA", "WERN", "HTLD"}.issubset(tickers_in_ledger)
+    assert {"SAIA", "KNX", "WERN", "HTLD", "LSTR"}.issubset(tickers_in_ledger)
 
 
 def test_e2e_workflow_ltm_software_and_commercial_services_from_live_postgres():
@@ -243,13 +243,43 @@ def test_e2e_workflow_ltm_software_and_commercial_services_from_live_postgres():
 
 def test_e2e_curated_sub_industry_and_customer_type_rank_from_live_postgres():
     """Curated DB sub_industry + customer_type steer peer ranking within an industry
-    without filtering out the remaining industry peers.
+    without filtering out the remaining industry peers under both v3 DB and v2 legacy.
     """
-    provider = PostgresMarketDataProvider()
-    app = create_valuation_graph(provider, checkpointer=MemorySaver())
-    config = {"configurable": {"thread_id": "case-gov-it-services-curated"}}
+    provider_v3 = PostgresMarketDataProvider()
+    app_v3 = create_valuation_graph(provider_v3, checkpointer=MemorySaver())
+    config_v3 = {"configurable": {"thread_id": "case-it-services-curated-v3"}}
 
-    answers = {
+    answers_v3 = {
+        "company_name": "Enterprise Data Ops Inc",
+        "business_description": "Enterprise IT data services and BPO solutions for corporate clients.",
+        "industry": Industry.IT_SERVICES.value,
+        "sub_industry": "enterprise_it_data_bpo",
+        "customer_type": "b2b",
+        "geography": "US",
+        "revenue": "500000000",
+        "ebitda": "55000000",
+        "ebitda_period": "FY",
+    }
+    app_v3.invoke({"intake_answers": answers_v3}, config=config_v3)
+    s2 = app_v3.invoke(Command(resume=Industry.IT_SERVICES.value), config=config_v3)
+    payload = s2["__interrupt__"][0].value
+    selected = payload["selected_peers"]
+    all_rows = s2["peer_screening_results"]
+    scores_by_t = {r["ticker"]: Decimal(str(r["business_score"])) for r in all_rows}
+
+    assert len(selected) == 5
+    # Under v3, enterprise_it_data_bpo + b2b peers score 1.000000 while cloud_cyber_comm_it + b2b score 0.500000
+    assert scores_by_t["ADP"] == Decimal("1.000000")
+    assert scores_by_t["FA"] == Decimal("1.000000")
+    assert scores_by_t["EVTC"] == Decimal("0.500000")
+    assert scores_by_t["ZS"] == Decimal("0.500000")
+    assert len(all_rows) == 9
+
+    # Legacy v2 rollback preserves curated gov IT ranking (20 eligible peers via fallback if DB holds v3)
+    provider_v2 = PostgresMarketDataProvider(method_version="cover-gaap-v2")
+    app_v2 = create_valuation_graph(provider_v2, checkpointer=MemorySaver())
+    config_v2 = {"configurable": {"thread_id": "case-gov-it-services-curated-v2"}}
+    answers_v2 = {
         "company_name": "Federal Mission Cloud Corp",
         "business_description": "Enterprise IT systems integration for US defense and civilian agencies.",
         "industry": Industry.IT_SERVICES.value,
@@ -260,20 +290,11 @@ def test_e2e_curated_sub_industry_and_customer_type_rank_from_live_postgres():
         "ebitda": "55000000",
         "ebitda_period": "FY",
     }
-    app.invoke({"intake_answers": answers}, config=config)
-    s2 = app.invoke(Command(resume=Industry.IT_SERVICES.value), config=config)
-    payload = s2["__interrupt__"][0].value
-    selected = payload["selected_peers"]
-    all_rows = s2["peer_screening_results"]
-    scores_by_t = {r["ticker"]: Decimal(str(r["business_score"])) for r in all_rows}
-
-    assert len(selected) == 5
-    # Gov IT peers in enterprise_it_data_bpo match both sub_industry & gov -> 1.000000
-    assert scores_by_t["CACI"] == Decimal("1.000000")
-    assert scores_by_t["SAIC"] == Decimal("1.000000")
-    # Same sub_industry but B2B customer_type -> 0.500000; different sub_industry + B2B -> 0.000000
-    assert scores_by_t["CTSH"] == Decimal("0.500000")
-    assert scores_by_t["ZS"] == Decimal("0.000000")
-    assert "CACI" in selected
-    # Pool size stays intact across the full verified industry (all 20 eligible peers ranked, not hard-filtered)
-    assert len(all_rows) == 20
+    app_v2.invoke({"intake_answers": answers_v2}, config=config_v2)
+    s2_v2 = app_v2.invoke(Command(resume=Industry.IT_SERVICES.value), config=config_v2)
+    rows_v2 = s2_v2["peer_screening_results"]
+    scores_v2 = {r["ticker"]: Decimal(str(r["business_score"])) for r in rows_v2}
+    assert scores_v2["CACI"] == Decimal("1.000000")
+    assert scores_v2["CTSH"] == Decimal("0.500000")
+    assert scores_v2["ZS"] == Decimal("0.000000")
+    assert len(rows_v2) == 20

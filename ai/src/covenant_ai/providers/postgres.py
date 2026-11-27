@@ -16,13 +16,24 @@ import psycopg
 
 from covenant_ai.domain.bridge import compute_ebit, compute_ebitda
 from covenant_ai.domain.business_profile import BusinessDimension, BusinessProfile
+from covenant_ai.domain.evidence import DEFAULT_METHOD_VERSION, ProviderFailure, normalize_method_version
 from covenant_ai.domain.models import FinancialDatapoint, SourceType
 from covenant_ai.domain.screening import PeerScreeningCandidate
 from covenant_ai.providers.base import MarketDataProvider
 from covenant_ai.providers.db_schema import DEFAULT_DB_URL, normalize_db_url
 from covenant_ai.providers.edgar import EdgarMarketDataProvider
+from covenant_ai.providers.edgar_errors import MissingEvidenceError, ProviderFailureMixin
+from covenant_ai.providers.edgar_manifest import ProviderMode, normalize_provider_mode
 
 logger = logging.getLogger(__name__)
+
+# Only the v2 seeder existed before batch provenance was recorded. Older batches
+# remain readable on the legacy path without writing an inferred version to them.
+_BATCH_JOIN = "LEFT JOIN peer_baseline_batches batch ON batch.id = pc.baseline_id"
+_METHOD_MATCH = "COALESCE(batch.method_version, 'cover-gaap-v2') = %s"
+_HAS_METHOD_BASELINE_SQL = (
+    f"SELECT EXISTS(SELECT 1 FROM peer_companies pc {_BATCH_JOIN} WHERE {_METHOD_MATCH});"
+)
 
 
 class PostgresMarketDataProvider:
@@ -33,10 +44,16 @@ class PostgresMarketDataProvider:
         db_url: str | None = None,
         fallback_to_edgar: bool = True,
         allow_on_demand_yahoo: bool = False,
+        method_version: str = DEFAULT_METHOD_VERSION,
+        *,
+        edgar_mode: ProviderMode | str | None = None,
     ) -> None:
         self.db_url = normalize_db_url(db_url)
         self.fallback_to_edgar = fallback_to_edgar
         self.allow_on_demand_yahoo = allow_on_demand_yahoo
+        self.method_version = normalize_method_version(method_version).value
+        self.edgar_mode = normalize_provider_mode(edgar_mode) if edgar_mode is not None else ProviderMode.COLLECT
+        self.last_screening_failures: dict[str, ProviderFailure] = {}
         # Avoid a network request to SEC at construction time when the DB is
         # available; initialize the fallback only if a read actually needs it.
         self._edgar: EdgarMarketDataProvider | None = None
@@ -44,7 +61,9 @@ class PostgresMarketDataProvider:
     def _get_edgar(self) -> EdgarMarketDataProvider:
         if self._edgar is None:
             self._edgar = EdgarMarketDataProvider(
-                allow_on_demand_yahoo=self.allow_on_demand_yahoo
+                allow_on_demand_yahoo=self.allow_on_demand_yahoo,
+                method_version=self.method_version,
+                mode=self.edgar_mode,
             )
         return self._edgar
 
@@ -66,28 +85,23 @@ class PostgresMarketDataProvider:
         try:
             with psycopg.connect(self.db_url, connect_timeout=3) as conn:
                 with conn.cursor() as cur:
-                    if include_ev_sales_only:
-                        cur.execute(
-                            "SELECT ticker FROM peer_companies "
-                            "WHERE industry = %s AND verified = TRUE ORDER BY ticker;",
-                            (ind_key,),
-                        )
-                    else:
-                        cur.execute(
-                            "SELECT ticker FROM peer_companies "
-                            "WHERE industry = %s AND verified = TRUE "
-                            "AND COALESCE(ev_ebitda_eligible, TRUE) = TRUE ORDER BY ticker;",
-                            (ind_key,),
-                        )
+                    cur.execute(
+                        f"SELECT pc.ticker FROM peer_companies pc {_BATCH_JOIN} "
+                        f"WHERE {_METHOD_MATCH} AND pc.industry = %s AND pc.verified "
+                        "AND (%s OR COALESCE(pc.ev_ebitda_eligible, TRUE)) ORDER BY pc.ticker",
+                        (self.method_version, ind_key, include_ev_sales_only),
+                    )
                     rows = cur.fetchall()
                     if rows:
                         return [r[0] for r in rows]
-                    cur.execute("SELECT EXISTS(SELECT 1 FROM peer_companies LIMIT 1);")
+                    cur.execute(_HAS_METHOD_BASELINE_SQL, (self.method_version,))
                     has_seeded_data = bool(cur.fetchone()[0])
                     if has_seeded_data:
                         return []
-        except Exception as exc:
+        except (psycopg.OperationalError, psycopg.InterfaceError) as exc:
             logger.warning("Peer DB lookup failed for industry %s: %s", industry, exc)
+            if not self.fallback_to_edgar:
+                raise
 
         if self.fallback_to_edgar:
             return self._get_edgar().get_candidate_peers(ind_key)
@@ -98,11 +112,12 @@ class PostgresMarketDataProvider:
         try:
             with psycopg.connect(self.db_url, connect_timeout=3) as conn:
                 row = conn.execute(
-                    "SELECT verified, exchange FROM peer_companies WHERE ticker=%s", (ticker,)
+                    f"SELECT pc.verified AND {_METHOD_MATCH}, pc.exchange FROM peer_companies pc "
+                    f"{_BATCH_JOIN} WHERE pc.ticker=%s", (self.method_version, ticker)
                 ).fetchone()
-                if row:
-                    return bool(row[0] and row[1] in {"NYSE", "Nasdaq", "NYSE American", "CBOE"})
-                if conn.execute("SELECT EXISTS (SELECT 1 FROM peer_companies)").fetchone()[0]:
+                if row and row[0]:
+                    return bool(row[1] in {"NYSE", "Nasdaq", "NYSE American", "CBOE"})
+                if conn.execute(_HAS_METHOD_BASELINE_SQL, (self.method_version,)).fetchone()[0]:
                     return False
         except psycopg.OperationalError:
             if not self.fallback_to_edgar:
@@ -122,27 +137,48 @@ class PostgresMarketDataProvider:
             with psycopg.connect(self.db_url, connect_timeout=3) as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """
-                        SELECT id, metric, value, currency, period, period_end,
+                        f"""
+                        SELECT financial_datapoints.id, metric, value, currency, period, period_end,
                                source_type, source_ref, retrieved_at
                         FROM financial_datapoints
                         JOIN peer_companies pc ON pc.ticker=financial_datapoints.peer_ticker
-                        WHERE peer_ticker = %s AND pc.verified
+                        {_BATCH_JOIN}
+                        WHERE {_METHOD_MATCH} AND peer_ticker = %s AND pc.verified
                           AND (financial_datapoints.baseline_id IS NOT DISTINCT FROM pc.baseline_id OR source_type='user_provided')
                           AND period = %s
                           AND run_id IS NULL
                         ORDER BY metric;
                         """,
-                        (ticker, norm_period),
+                        (self.method_version, ticker, norm_period),
                     )
                     rows = cur.fetchall()
                     if not rows:
-                        error = cur.execute(
-                            "SELECT baseline_errors->>%s FROM peer_companies WHERE ticker=%s AND verified",
-                            (norm_period, ticker)
+                        row_err = cur.execute(
+                            f"SELECT ({_METHOD_MATCH}), pc.baseline_errors->>%s "
+                            f"FROM peer_companies pc {_BATCH_JOIN} WHERE pc.ticker=%s AND pc.verified",
+                            (self.method_version, norm_period, ticker)
                         ).fetchone()
-                        if error:
-                            raise KeyError(error[0] or f"No current {norm_period} baseline for {ticker}")
+                        if row_err is not None:
+                            same_method, baseline_err = bool(row_err[0]), row_err[1]
+                            if same_method or not self.fallback_to_edgar:
+                                msg = (
+                                    (baseline_err or f"No current {norm_period} baseline for {ticker}")
+                                    if same_method
+                                    else "Peer baseline is incompatible with the requested methodology"
+                                )
+                                from covenant_ai.domain.evidence import FailureReasonCode, FailureStage
+
+                                raise MissingEvidenceError(
+                                    ProviderFailure(
+                                        ticker=ticker,
+                                        period=norm_period,
+                                        stage=FailureStage.DATABASE,
+                                        reason_code=FailureReasonCode.FACT_MISSING,
+                                        message=msg,
+                                        source="postgresql:peer_companies.baseline_errors",
+                                        retryable=False,
+                                    )
+                                )
                     for r in rows:
                         pts.append(
                             FinancialDatapoint(
@@ -158,8 +194,10 @@ class PostgresMarketDataProvider:
                                 retrieved_at=r[8] if r[8] else datetime.now(UTC),
                             )
                         )
-        except psycopg.OperationalError as exc:
+        except (psycopg.OperationalError, psycopg.InterfaceError) as exc:
             logger.warning("Peer DB lookup failed for ticker %s: %s", ticker, exc)
+            if not self.fallback_to_edgar:
+                raise
 
         if pts:
             return pts
@@ -180,29 +218,31 @@ class PostgresMarketDataProvider:
         """Build multi-factor PeerScreeningCandidate summaries from seeded DB metrics."""
         ind_key = industry.strip().lower()
         norm_period = period.strip().upper()
+        self.last_screening_failures = {}
         try:
             with psycopg.connect(self.db_url, connect_timeout=3) as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """
+                        f"""
                         SELECT pc.ticker, pc.ev_tier, pc.sub_industry, pc.customer_type,
                                pc.classification_source, fd.metric, fd.value
                         FROM peer_companies pc
+                        {_BATCH_JOIN}
                         LEFT JOIN financial_datapoints fd
                           ON fd.peer_ticker = pc.ticker
                          AND (fd.baseline_id IS NOT DISTINCT FROM pc.baseline_id OR fd.source_type='user_provided')
                          AND fd.run_id IS NULL
                          AND fd.period = %s
-                        WHERE pc.industry = %s
+                        WHERE {_METHOD_MATCH} AND pc.industry = %s
                           AND pc.verified = TRUE
                           AND (%s OR COALESCE(pc.ev_ebitda_eligible, TRUE) = TRUE)
                         ORDER BY pc.ticker, fd.metric, CASE fd.source_type WHEN 'user_provided' THEN 3 WHEN 'sec_filing' THEN 2 ELSE 1 END, fd.period_end NULLS FIRST, fd.retrieved_at, fd.id;
                         """,
-                        (norm_period, ind_key, include_ev_sales_only),
+                        (norm_period, self.method_version, ind_key, include_ev_sales_only),
                     )
                     rows = cur.fetchall()
                     if not rows:
-                        cur.execute("SELECT EXISTS(SELECT 1 FROM peer_companies LIMIT 1);")
+                        cur.execute(_HAS_METHOD_BASELINE_SQL, (self.method_version,))
                         if bool(cur.fetchone()[0]):
                             return []
                     else:
@@ -251,7 +291,13 @@ class PostgresMarketDataProvider:
                             roic = None
                             equity = m.get("total_equity")
                             etr = m.get("effective_tax_rate")
-                            if ebit is not None and etr is not None and equity is not None:
+                            if (
+                                ebit is not None
+                                and etr is not None
+                                and equity is not None
+                                and debt is not None
+                                and cash is not None
+                            ):
                                 inv_cap = debt + equity - cash
                                 if inv_cap > 0:
                                     roic = (ebit * (Decimal(1) - etr)) / inv_cap
@@ -291,10 +337,16 @@ class PostgresMarketDataProvider:
                                     business_profile=biz_profile,
                                 )
                             )
+                        self.last_screening_failures = {}
                         return cands
-        except Exception as exc:
+        except (psycopg.OperationalError, psycopg.InterfaceError) as exc:
             logger.warning("Peer screening DB lookup failed for %s: %s", industry, exc)
+            if not self.fallback_to_edgar:
+                raise
 
         if self.fallback_to_edgar:
-            return self._get_edgar().get_peer_screening_candidates(ind_key, period=norm_period)
+            edgar = self._get_edgar()
+            cands = edgar.get_peer_screening_candidates(ind_key, period=norm_period)
+            self.last_screening_failures = dict(getattr(edgar, "last_screening_failures", {}))
+            return cands
         return []

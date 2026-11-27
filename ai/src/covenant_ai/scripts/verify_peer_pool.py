@@ -21,8 +21,16 @@ import os
 import sys
 import time
 import urllib.request
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
+
+from covenant_ai.providers.edgar_tags import (
+    TAG_DA_COMBINED,
+    TAG_INCOME_CONTINUING,
+    TAG_INTEREST_EXPENSE,
+    TAG_TAX_EXPENSE,
+)
+from covenant_ai.providers.xbrl_reader import XbrlFactReader
 
 
 def _resolve_user_agent() -> str:
@@ -47,34 +55,12 @@ CACHE = Path(".edgar_cache")
 # registry metric -> candidate us-gaap tags (first match wins per period).
 # These lists are my best guess: check the first failures and extend them.
 METRIC_TAGS: dict[str, list[str]] = {
-    "income_continuing_ops": [
-        "IncomeLossFromContinuingOperations",
-        "IncomeLossFromContinuingOperationsIncludingPortionAttributableToNoncontrollingInterest",
-        "ProfitLoss",
-        # fallback: companies without discontinued ops often tag only NetIncomeLoss.
-        # Equals income from continuing ops when there are no discontinued ops.
-        "NetIncomeLoss",
-    ],
-    "interest_expense_net": [
-        "InterestExpense",
-        "InterestExpenseNonoperating",
-        "InterestExpenseDebt",
-        "InterestExpenseLongTermDebt",
-        "InterestAndDebtExpense",
-        "InterestExpenseOther",
-        "InterestExpenseOperating",  # SAIC
-        # NET tags: sign is ambiguous (negative = net expense). Handle in the provider.
-        "InterestIncomeExpenseNet",
-        "InterestIncomeExpenseNonoperatingNet",
-    ],
-    "income_tax_expense": ["IncomeTaxExpenseBenefit"],
-    "depreciation_amortization": [
-        "DepreciationDepletionAndAmortization",
-        "DepreciationAndAmortization",
-        "DepreciationAmortizationAndAccretionNet",
-        "DepreciationAmortizationAndOther",
-    ],
+    "income_continuing_ops": list(TAG_INCOME_CONTINUING),
+    "interest_expense_net": list(TAG_INTEREST_EXPENSE),
+    "income_tax_expense": list(TAG_TAX_EXPENSE),
+    "depreciation_amortization": list(TAG_DA_COMBINED),
 }
+_READER = XbrlFactReader()
 
 
 def load_pools(industry_file: str) -> dict[str, dict]:
@@ -114,23 +100,11 @@ def ticker_map() -> dict[str, int]:
 
 def annual_periods(facts: dict, tags: list[str]) -> dict[str, dict]:
     """period_end -> {tag, val, accn} for annual 10-K / 10-K/A values (~1 year duration)."""
-    out: dict[str, dict] = {}
     gaap = facts.get("facts", {}).get("us-gaap", {})
-    for tag in tags:
-        best: dict[str, tuple[tuple[str, bool, str], dict]] = {}
-        for e in gaap.get(tag, {}).get("units", {}).get("USD", []):
-            if e.get("form") not in ("10-K", "10-K/A") or e.get("fp") != "FY" or "start" not in e:
-                continue
-            days = (date.fromisoformat(e["end"]) - date.fromisoformat(e["start"])).days
-            if not 340 <= days <= 380:
-                continue
-            rank = (e.get("filed", ""), e.get("form") == "10-K/A", e.get("accn", ""))
-            cand = {"tag": tag, "val": e["val"], "accn": e["accn"]}
-            if e["end"] not in best or rank > best[e["end"]][0]:
-                best[e["end"]] = (rank, cand)
-        for end_dt, (_, cand) in best.items():
-            out.setdefault(end_dt, cand)
-    return out
+    return {
+        k: {"tag": f.tag, "val": f.value, "accn": f.accn}
+        for k, f in _READER.find_annual_facts(gaap, tuple(tags)).items()
+    }
 
 
 DEBT_TAGS = [
@@ -150,25 +124,18 @@ HINT_SKIP = ("Unrecognized", "Accumulated", "Deferred", "Prepaid", "Payable",
 
 
 def da_periods(facts: dict, allow_partial: bool) -> dict[str, dict]:
-    """D&A per period_end with a recorded basis:
-    combined = one tag, composite = Depreciation + AmortizationOfIntangibleAssets,
-    depreciation_only = Depreciation alone (understates D&A; only if allow_partial)."""
-    out = dict(annual_periods(facts, METRIC_TAGS["depreciation_amortization"]))
-    for v in out.values():
-        v["basis"] = "combined"
-    dep = annual_periods(facts, ["Depreciation"])
-    amo = annual_periods(facts, ["AmortizationOfIntangibleAssets"])
-    for end, d in dep.items():
-        if end in out:
-            continue
-        if end in amo:
-            out[end] = {"tag": "Depreciation+AmortizationOfIntangibleAssets",
-                        "val": d["val"] + amo[end]["val"], "accn": d["accn"],
-                        "basis": "composite"}
-        elif allow_partial:
-            out[end] = {"tag": "Depreciation(partial)", "val": d["val"],
-                        "accn": d["accn"], "basis": "depreciation_only"}
-    return out
+    """D&A per period_end sharing XbrlFactReader composite / partial basis logic."""
+    gaap = facts.get("facts", {}).get("us-gaap", {})
+    da_facts, basis_map = _READER.find_da_annual_facts(gaap, allow_partial=allow_partial)
+    return {
+        end_dt: {
+            "tag": f.tag,
+            "val": f.value,
+            "accn": f.accn,
+            "basis": basis_map[end_dt],
+        }
+        for end_dt, f in da_facts.items()
+    }
 
 
 def has_debt(facts: dict) -> str | None:
@@ -341,7 +308,7 @@ def main() -> None:
             print(f"  WARN D&A depreciation_only: {', '.join(part)}")
 
     Path("peer_verification.json").write_text(
-        json.dumps({"generated": datetime.now().isoformat(), "industries": report}, indent=2)
+        json.dumps({"generated": datetime.now(UTC).isoformat(), "industries": report}, indent=2)
     )
     print("\nwrote peer_verification.json")
 

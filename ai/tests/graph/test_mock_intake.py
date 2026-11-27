@@ -52,7 +52,7 @@ def test_mock_intake_persona_a_clean_tech_founder():
     assert "__interrupt__" in s2
 
     # Step 3: Peer Review
-    peers = ["ADBE", "CRM", "INTU"]
+    peers = ["ADBE", "CRM", "SNPS"]
     final = app.invoke(Command(resume=peers), config=config)
 
     assert "__interrupt__" not in final
@@ -109,7 +109,7 @@ def test_mock_intake_persona_b_messy_family_business():
     assert "__interrupt__" in s2
 
     # Step 3: Peer Review
-    peers = ["YUM", "SBUX", "BJRI"]
+    peers = ["YUM", "DRI", "BJRI"]
     final = app.invoke(Command(resume=peers), config=config)
 
     assert "__interrupt__" not in final
@@ -160,7 +160,7 @@ def test_mock_intake_persona_c_distressed_manufacturer():
     assert "__interrupt__" in s2
 
     # Step 3: Peer Review
-    peers = ["CROX", "DECK", "PVH"]
+    peers = ["PVH", "CRI", "KTB"]
     final = app.invoke(Command(resume=peers), config=config)
 
     assert "__interrupt__" not in final

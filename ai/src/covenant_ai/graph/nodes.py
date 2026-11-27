@@ -12,9 +12,11 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
+import psycopg
 from langgraph.types import interrupt
 
 from covenant_ai.domain.bridge import build_peer_financials, flag_peer
+from covenant_ai.domain.evidence import FailureReasonCode, FailureStage, MethodologyVersion, ProviderFailure, normalize_method_version
 from covenant_ai.domain.models import FinancialDatapoint, SourceType
 from datetime import datetime, UTC
 from covenant_ai.domain.errors import MissingFieldError, ValuationError
@@ -54,6 +56,7 @@ from covenant_ai.llm.intake_agent import extract_intake_from_text
 from covenant_ai.llm.narrative_agent import draft_hybrid_narrative
 from covenant_ai.llm.prompts import PROMPT_VERSION_EXPLAIN
 from covenant_ai.providers.base import MarketDataProvider
+from covenant_ai.providers.edgar_errors import ProviderFailureMixin, classify_provider_exception
 from covenant_ai.tools.fetch import fetch_peer_financials
 
 MAX_RETRIES = 2
@@ -358,6 +361,21 @@ def confirm_industry_node(state: ValuationState) -> dict[str, Any]:
         payload = {**payload, "error": f"Unsupported industry: {confirmed!r}"}
 
 
+def _provider_method(state: ValuationState, provider: MarketDataProvider | None) -> str:
+    raw = getattr(provider, "method_version", MethodologyVersion.V2)
+    if raw is None:
+        raise ValueError("The provider does not record a method for these datapoints.")
+    active = normalize_method_version(raw)
+    pinned = state.get("method_version")
+    if pinned is None and (state.get("candidate_tickers") or state.get("selected_peers")
+                           or any(dp.peer_ticker for dp in state.get("ledger", []))):
+        # Checkpoints predating version pinning were produced by the original v2 workflow.
+        pinned = MethodologyVersion.V2.value
+    if pinned is not None and normalize_method_version(pinned) != active:
+        raise ValueError(f"Checkpoint method {pinned} differs from provider method {active}.")
+    return active.value
+
+
 def make_peer_candidates_node(provider: MarketDataProvider | None = None):
     """Factory creating peer_candidates_node using provider pools when available."""
 
@@ -366,6 +384,7 @@ def make_peer_candidates_node(provider: MarketDataProvider | None = None):
 
         Raises ValueError if the industry enum is not present in DEFAULT_CANDIDATE_POOL.
         """
+        method = _provider_method(state, provider)
         industry = state.get("industry_enum")
         if industry not in DEFAULT_CANDIDATE_POOL:
             raise ValueError(f"No candidate pool for industry {industry!r}")
@@ -383,13 +402,14 @@ def make_peer_candidates_node(provider: MarketDataProvider | None = None):
         if len(peers) < MIN_PEERS:
             return {
                 "candidate_tickers": peers,
+                "method_version": method,
                 "insufficient_peers": True,
                 "quality_issues": [
                     f"Industry {industry!r} has only {len(peers)} eligible peer(s); "
                     f"at least {MIN_PEERS} required."
                 ],
             }
-        return {"candidate_tickers": peers}
+        return {"candidate_tickers": peers, "method_version": method}
 
     return _peer_candidates_node
 
@@ -414,6 +434,7 @@ def make_peer_rank_node(provider: MarketDataProvider | None = None):
         provider supports get_peer_screening_candidates, and degrades deterministically
         to candidate order when providers return partial/no screening metrics.
         """
+        _provider_method(state, provider)
         disqualified = set(state.get("disqualified_peers") or [])
         candidates = state.get("candidate_tickers") or []
         eligible = [t for t in candidates if t not in disqualified]
@@ -432,6 +453,8 @@ def make_peer_rank_node(provider: MarketDataProvider | None = None):
             )
 
         by_ticker: dict[str, PeerScreeningCandidate] = {}
+        screening_failures: dict[str, dict[str, Any]] = dict(state.get("screening_failures") or {})
+        screening_issues: list[str] = []
         get_screening = getattr(provider, "get_peer_screening_candidates", None) if provider is not None else None
         if callable(get_screening):
             industry = state.get("industry_enum") or profile.industry or ""
@@ -439,16 +462,36 @@ def make_peer_rank_node(provider: MarketDataProvider | None = None):
             try:
                 screening_cands = get_screening(industry, period=period)
                 by_ticker = {c.ticker.upper(): c for c in screening_cands}
-            except Exception:
+                raw_failures = getattr(provider, "last_screening_failures", None) or {}
+                for t_err, pf in raw_failures.items():
+                    screening_failures[str(t_err).upper()] = (
+                        pf.model_dump(mode="json") if hasattr(pf, "model_dump") else dict(pf)
+                    )
+            except (ProviderFailureMixin, psycopg.OperationalError, psycopg.InterfaceError, KeyError, ValueError, OSError) as exc:
+                failure, is_bug = classify_provider_exception(
+                    exc,
+                    ticker="__screening__",
+                    period=period,
+                    stage=FailureStage.SCREENING,
+                )
+                if is_bug:
+                    raise
                 by_ticker = {}
+                screening_failures["__screening__"] = failure.model_dump(mode="json")
+                screening_issues.append(f"screening_fallback: {failure.message}")
 
         ordered_inputs = [by_ticker.get(t.upper()) or PeerScreeningCandidate(ticker=t) for t in eligible]
         ranked = score_peers(profile, ordered_inputs, top_n=5)
         top_peers = [s.ticker for s in ranked[:5]]
-        return {
+        out: dict[str, Any] = {
             "selected_peers": top_peers,
             "peer_screening_results": [s.model_dump(mode="json") for s in ranked],
         }
+        if screening_failures:
+            out["screening_failures"] = screening_failures
+        if screening_issues:
+            out["quality_issues"] = [*(state.get("quality_issues") or []), *screening_issues]
+        return out
 
     return peer_rank_node
 
@@ -520,19 +563,24 @@ def make_fetch_data_node(provider: MarketDataProvider):
     """
 
     def fetch_data_node(state: ValuationState) -> dict[str, Any]:
+        method = _provider_method(state, provider)
         tickers = state.get("selected_peers") or []
         period = state.get("target_period", "FY")
         have = {d.peer_ticker for d in (state.get("ledger") or []) if d.peer_ticker}
         to_fetch = [t for t in tickers if t not in have]
         if not to_fetch:
-            return {}
+            return {"method_version": method}
         tool_res, new_datapoints = fetch_peer_financials(provider, to_fetch, period)
-        out: dict[str, Any] = {"ledger": new_datapoints}
+        out: dict[str, Any] = {"ledger": new_datapoints, "method_version": method}
         if tool_res.data and isinstance(tool_res.data, dict):
             failed = tool_res.data.get("failed")
             if failed:
                 prior = state.get("failed_peers") or {}
                 out["failed_peers"] = {**prior, **failed}
+            failed_details = tool_res.data.get("failed_details")
+            if failed_details:
+                prior_details = state.get("failed_peer_details") or {}
+                out["failed_peer_details"] = {**prior_details, **failed_details}
         return out
 
     return fetch_data_node
@@ -543,8 +591,10 @@ def compute_node(state: ValuationState) -> dict[str, Any]:
     ledger = state.get("ledger") or []
     period = state.get("target_period", "FY")
     prior = state.get("failed_peers") or {}
+    prior_details = dict(state.get("failed_peer_details") or {})
     valid_peers: list[PeerFinancials] = []
     failed_peers: dict[str, str] = {}
+    failed_details: dict[str, dict[str, Any]] = {}
 
     for ticker in state.get("selected_peers", []):
         try:
@@ -552,6 +602,15 @@ def compute_node(state: ValuationState) -> dict[str, Any]:
             reason = public_peer_exclusion(peer)
             if reason:
                 failed_peers[ticker] = reason
+                failed_details[ticker] = ProviderFailure(
+                    ticker=ticker,
+                    period=period,
+                    stage=FailureStage.BRIDGE,
+                    reason_code=FailureReasonCode.UNSUPPORTED_BASIS,
+                    message=reason,
+                    source="domain.valuation.public_peer_exclusion",
+                    retryable=False,
+                ).model_dump(mode="json")
             else:
                 valid_peers.append(peer)
         except MissingFieldError as e:
@@ -560,16 +619,39 @@ def compute_node(state: ValuationState) -> dict[str, Any]:
                 failed_peers[ticker] = f"missing fields: {e.missing} (provider: {prior_reason})"
             else:
                 failed_peers[ticker] = f"missing fields: {e.missing}"
+            if ticker in prior_details:
+                failed_details[ticker] = prior_details[ticker]
+            else:
+                failed_details[ticker] = ProviderFailure(
+                    ticker=ticker,
+                    period=period,
+                    stage=FailureStage.BRIDGE,
+                    reason_code=FailureReasonCode.FACT_MISSING,
+                    message=failed_peers[ticker],
+                    source="domain.bridge.build_peer_financials",
+                    retryable=False,
+                ).model_dump(mode="json")
         except ValuationError as e:
             failed_peers[ticker] = str(e)
+            failed_details[ticker] = ProviderFailure(
+                ticker=ticker,
+                period=period,
+                stage=FailureStage.BRIDGE,
+                reason_code=FailureReasonCode.UNSUPPORTED_BASIS,
+                message=str(e),
+                source="domain.bridge.build_peer_financials",
+                retryable=False,
+            ).model_dump(mode="json")
 
     # Accumulate failed peers across retry rounds to preserve disclosure audit trail
     valid_tickers = {p.ticker for p in valid_peers}
     merged = {t: r for t, r in {**prior, **failed_peers}.items() if t not in valid_tickers}
+    merged_details = {t: d for t, d in {**prior_details, **failed_details}.items() if t not in valid_tickers}
 
     return {
         "peer_financials": valid_peers,
         "failed_peers": merged,
+        "failed_peer_details": merged_details,
     }
 
 
@@ -688,7 +770,8 @@ def valuation_node(state: ValuationState) -> dict[str, Any]:
         result.price_date_range = (min(dates), max(dates))
         result.limitations.append(f"Peer cover-date prices span {min(dates)} to {max(dates)}.")
     result.risk_codes = [code for code, applies in (
-        ("nci_material", bool(result.peer_flags)),
+        ("nci_material", any(code.startswith("nci_") for flags in result.peer_flags.values() for code in flags)),
+        ("equity_method_exposure", any(code.startswith("equity_method_") for flags in result.peer_flags.values() for code in flags)),
         ("small_peer_count", len(result.multiples_used) < 5),
         ("excluded_or_failed_peers", bool(state.get("failed_peers"))),
         ("equity_inputs_missing", result.target_net_debt is None),

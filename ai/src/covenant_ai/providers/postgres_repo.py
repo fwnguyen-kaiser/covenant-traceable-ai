@@ -17,6 +17,7 @@ from uuid import UUID, uuid5
 import psycopg
 
 from covenant_ai.domain.bridge import build_peer_financials
+from covenant_ai.domain.evidence import DEFAULT_METHOD_VERSION
 from covenant_ai.domain.models import CompanyProfile, FinancialDatapoint
 from covenant_ai.domain.screening import PeerScreeningScore
 from covenant_ai.providers.reviewer import authorized_windows_reviewer
@@ -71,7 +72,8 @@ def make_review_packet(run_id: UUID, state: dict) -> dict:
                            "inputs": ["company_profile.total_debt", "company_profile.cash"]},
         },
         **{key: state.get(key) for key in keys},
-        "method_version": "cover-gaap-v2",
+        **{key: state[key] for key in ("screening_failures", "failed_peer_details") if state.get(key)},
+        "method_version": str(state.get("method_version") or DEFAULT_METHOD_VERSION),
         "release_status": "draft",
         "sources": [
             {**dp.model_dump(mode="json"), "snapshot_id": str(uuid5(run_id, str(dp.id)))}

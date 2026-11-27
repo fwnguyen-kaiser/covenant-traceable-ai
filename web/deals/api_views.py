@@ -16,6 +16,7 @@ from covenant_ai.app.admin import AdminIdentityService
 from covenant_ai.app.authz import ActorContext, AuthorizationService
 from covenant_ai.app.cases import CaseService
 from covenant_ai.app.chat import AgentChatService
+from covenant_ai.domain.evidence import inspect_v2_packet_remediation_warnings
 from covenant_ai.app.errors import (
     ConflictAppError,
     ForbiddenActionError,
@@ -277,7 +278,7 @@ def api_release_queue(_request: HttpRequest, actor: ActorContext) -> JsonRespons
 @api_view(["GET"])
 def api_run_report(_request: HttpRequest, actor: ActorContext, run_id: UUID) -> JsonResponse:
     pkt = ReviewService(_repo()).get_frozen_packet_by_run(run_id, actor=actor)
-    return JsonResponse(pkt)
+    return JsonResponse({**pkt, "review_notices": inspect_v2_packet_remediation_warnings(pkt)})
 
 
 @api_view(["POST"])

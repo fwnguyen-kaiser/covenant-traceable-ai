@@ -8,6 +8,23 @@
 
 ## Architecture Overview
 
+### How a peer figure reaches a report
+
+The EDGAR provider coordinates four parts. `EdgarClient` reads SEC filings and manages the local cache. `XbrlFactReader` identifies a reported fact, its period and its filing. `PriceSnapshotStore` matches cover-page shares with an exchange close. `PeerDatapointBuilder` assembles FY and LTM inputs with their sources. The domain layer consumes those inputs to calculate the valuation. This separation lets a test replace the network or clock and still exercise the production accounting code.
+
+The workflow pins its methodology when it selects the peer universe. A resumed run checks this version before reading more peers. New seed batches record their method, and the database reader filters by it. Older, unmarked batches are readable through the historical v2 path. Review packets carry the run's version into exports. The web report displays screening failures and legacy data notices alongside the frozen numbers.
+
+`cover-gaap-v3` is the production default. Under approved scope decisions **D1** and **D2**, peer Enterprise Value excludes separated ASC 842 operating leases (retaining finance leases so EV stays aligned with post-rent EBITDA), recovers Tier-5 debt instruments, enforces normalized `-net` or same-accession pure interest income parity (blocking gross-only interest as unresolved scope), verifies multi-class share scope, and discloses equity-method affiliate exposure (`equity_method_disclosed` / `equity_method_asymmetric_disclosure`) for manual review without silent automatic EBIT/EV adjustments. Because strict accounting evidence gates exclude gross-only and operating-lease-only issuers, seeded `cover-gaap-v3` pools are smaller (`>= 5` verified peers per industry; Valuation Graph hard floor `MIN_PEERS = 3` remains enforced).
+
+`cover-gaap-v2` remains available for legacy packet verification, parallel auditing, and rollback (`--method-version cover-gaap-v2`). An operator can compare both methods against identical cached public inputs from `ai/`:
+
+```powershell
+.\.venv\Scripts\python.exe -m covenant_ai.scripts.compare_edgar_methods --cache src/covenant_ai/.edgar_cache --prices market_price_snapshots.csv --catalog src/covenant_ai/peer_verification.json --output comparison.json
+.\.venv\Scripts\python.exe -m covenant_ai.scripts.seed_db --method-version cover-gaap-v2 --offline   # explicit DB rollback example
+```
+
+Three explicit modes separate collection and determinism: **collect** (reads local cache first, fetches SEC on miss or corrupt payload, decodes before publishing atomically with `edgar_manifest.json` SHA-256 verification), **offline** (zero-network strict local bundle verified against manifest checksums), and **replay** (`ReplayMarketDataProvider(packet)` reading frozen review packet snapshots with zero cache/network I/O).
+
 ```text
 projectCovenant/
 ├── .githooks/                          # Repository pre-commit & commit-msg English-only guards
@@ -46,9 +63,9 @@ projectCovenant/
 3. **1:1 Identity Linking Without Breaking Legacy Audit UUIDs:** Django `auth_user` links 1:1 to `public.users(id UUID)` via `django_user_id`. Historical `public.users` rows with unverified credentials (`credentials_verified = FALSE`) remain blocked from web login until explicit activation (`activate_legacy_domain_user`), preserving every foreign key (`owner_id`, `actor_id`) and legacy `report_approvals` SID record intact.
 4. **Two Complementary Persistence Planes:**
    - **LangGraph Checkpoints (`PostgresSaver` + `COVENANT_MSGPACK_ALLOWLIST`):** Tracks *"Where do we resume?"* across HITL pauses (`intake_clarify`, `confirm_industry`, `peer_review`) and mid-flight interruptions.
-   - **Frozen Review Packet & `run_commands`:** Tracks *"What exact numbers, sources, and digest did the reviewer inspect?"* — canonical `SHA-256` digest over `review_packet` (`method_version="cover-gaap-v2"`), deterministic UUID5 datapoint copies (`origin_id`), and `client_message_id` + `prompt_id` deduplication across browser refreshes or retries.
+   - **Frozen Review Packet & `run_commands`:** Tracks *"What exact numbers, sources, and digest did the reviewer inspect?"* — canonical `SHA-256` digest over `review_packet` (`method_version` pinned to the run's methodology, defaulting to `cover-gaap-v3`), deterministic UUID5 datapoint copies (`origin_id`), and `client_message_id` + `prompt_id` deduplication across browser refreshes or retries.
 5. **Partial Balance-Sheet Honesty (`FIN-01`):** `parse_amount()` rejects floats, booleans, `NaN`/`Infinity`, and invalid comma grouping. Omitting `total_debt` or `cash` still computes Enterprise Value cleanly while leaving `equity_low`/`equity_mid`/`equity_high` as `None` (never substituting `$0` silently).
-6. **Eight Financial Data Invariants (`FIN-01`–`FIN-08`):** Strict `Decimal` arithmetic, point-in-time cover-page share counts × exact/prior-session closes (`cover_price_session`), consolidated bottom-up GAAP peer EBITDA (`NCI_MATERIALITY = 5%`) vs private `EbitdaAdjustmentSchedule`, XBRL disambiguation (`InterestIncomeExpenseNet` negation, STI guard, 5-tier debt + ASC 842 leases, `/A` & accession parity), `FY`/`LTM` period parity, `USER_PROVIDED > SEC_FILING > MARKET_DATA` ledger priority, full discrepancy disclosure, and `MIN_PUBLIC_EV = $100M` public comp floor.
+6. **Eight Financial Data Invariants (`FIN-01`–`FIN-08`):** Strict `Decimal` arithmetic, point-in-time cover-page share counts & multi-class scope checks × exact/prior-session closes (`cover_price_session`), consolidated bottom-up GAAP peer EBITDA (`NCI_MATERIALITY = 5%`, D2 equity-method manual review flags) vs private `EbitdaAdjustmentSchedule`, XBRL disambiguation (`cover-gaap-v3`: ex-operating-lease debt, 5-tier instrument resolution, normalized `-net` / same-accession interest income parity, STI guard, `/A` & accession parity), `FY`/`LTM` period parity, `USER_PROVIDED > SEC_FILING > MARKET_DATA` ledger priority, full discrepancy disclosure, and `MIN_PUBLIC_EV = $100M` public comp floor.
 
 ---
 

@@ -14,7 +14,7 @@ def test_e2e_valuation_workflow_with_real_edgar_data(edgar_provider_factory):
     """
     # PTC lacks a shares-outstanding fact in its latest 10-K accession, so it
     # cannot meet the required point-in-time market-cap input policy.
-    selected_peers = ["ADBE", "CRM", "INTU", "ADSK"]
+    selected_peers = ["ADBE", "CRM", "SNPS", "ADSK"]
     provider = edgar_provider_factory(*selected_peers)
     checkpointer = MemorySaver()
     app = create_valuation_graph(provider, checkpointer=checkpointer)

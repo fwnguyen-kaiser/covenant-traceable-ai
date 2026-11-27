@@ -10,14 +10,13 @@ from typing import Any
 import openpyxl
 from openpyxl.styles import Font
 
-
 EXCEL_MAX_SIG_DIGITS = 15
 
 
 def format_packet_banner(packet: dict[str, Any]) -> str:
     """Render the frozen packet release banner including SHA-256 fingerprint."""
     status = str(packet.get("release_status") or "draft").upper()
-    method = str(packet.get("method_version") or "cover-gaap-v2")
+    method = str(packet.get("method_version") or "method unrecorded")
     digest = str(packet.get("digest") or "")
     return f"**{status}** · {method} · SHA-256 `{digest}`"
 

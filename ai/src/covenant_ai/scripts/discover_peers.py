@@ -16,22 +16,18 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import time
-import urllib.error
-import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
+from covenant_ai.domain.bridge import compute_ebit, compute_ebitda
 from covenant_ai.domain.industry import INDUSTRIES, Industry
 from covenant_ai.providers.edgar import (
     ANNUAL_FORMS,
     QUARTERLY_FORMS,
     TAG_CASH,
-    TAG_DA_COMBINED,
     TAG_INCOME_CONTINUING,
     TAG_INTEREST_EXPENSE_GROSS,
     TAG_INTEREST_INCOME_EXPENSE_NET,
@@ -41,12 +37,12 @@ from covenant_ai.providers.edgar import (
     EdgarMarketDataProvider,
     _load_price_snapshot_index,
 )
+from covenant_ai.providers.edgar_client import EdgarClient
 from covenant_ai.providers.market_calendar import (
     cover_price_session,
     parse_yahoo_chart_closes,
 )
 
-NY_TZ = ZoneInfo("America/New_York")
 MAJOR_EXCHANGES = {"NYSE", "Nasdaq", "NYSE American", "CBOE"}
 EV_FLOOR_USD = Decimal("100000000")  # $100M minimum institutional floor
 SMALL_CAP_UPPER_USD = Decimal("2000000000")  # $2B
@@ -85,30 +81,16 @@ def _fetch_bytes_cached(
     sleep_sec: float,
     max_retries: int = 4,
 ) -> bytes:
-    cache_path = cache_dir / cache_name
-    if cache_path.exists():
-        return cache_path.read_bytes()
-
-    last_err: Exception | None = None
-    for attempt in range(max_retries):
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                raw = resp.read()
-            cache_path.write_bytes(raw)
-            time.sleep(sleep_sec)
-            return raw
-        except urllib.error.HTTPError as exc:
-            last_err = exc
-            if exc.code in (429, 500, 502, 503, 504):
-                time.sleep(max(sleep_sec, 1.5 * (attempt + 1)))
-                continue
-            raise
-        except Exception as exc:  # network hiccup retry
-            last_err = exc
-            time.sleep(1.0 * (attempt + 1))
-    assert last_err is not None
-    raise last_err
+    """Delegate HTTP + local caching + SEC throttling to shared EdgarClient."""
+    client = EdgarClient(cache_dir=cache_dir)
+    return client.fetch_bytes(
+        url,
+        cache_name=cache_name,
+        headers=headers,
+        sleep_sec=sleep_sec,
+        timeout=25.0,
+        max_retries=max_retries,
+    )
 
 
 def load_major_exchange_directory(
@@ -300,22 +282,8 @@ def verify_and_evaluate_candidate(
     tax_units = provider._find_annual_units(gaap, TAG_TAX_EXPENSE)
     gross_int = provider._find_annual_units(gaap, TAG_INTEREST_EXPENSE_GROSS)
     net_int = provider._find_annual_units(gaap, TAG_INTEREST_INCOME_EXPENSE_NET)
-    da_units = provider._find_annual_units(gaap, TAG_DA_COMBINED)
-    da_basis_map = {k: "combined" for k in da_units}
-
-    dep_units = provider._find_annual_units(gaap, ("Depreciation",))
-    amo_units = provider._find_annual_units(gaap, ("AmortizationOfIntangibleAssets",))
-    for end_dt, dep in dep_units.items():
-        amo = amo_units.get(end_dt)
-        if end_dt not in da_units and amo and dep["accn"] == amo["accn"]:
-            da_units[end_dt] = {
-                "tag": "Depreciation+AmortizationOfIntangibleAssets",
-                "val": dep["val"] + amo["val"],
-                "accn": dep["accn"],
-                "filed": dep.get("filed", ""),
-                "period_end": end_dt,
-            }
-            da_basis_map[end_dt] = "composite"
+    da_facts, da_basis_map = provider.fact_reader.find_da_annual_facts(gaap, allow_partial=False)
+    da_units = {k: v.to_legacy_dict() for k, v in da_facts.items()}
 
     if not inc_units or not tax_units or not da_units:
         rec["drop_reason"] = "missing_core_gaap_income_or_da"
@@ -447,8 +415,12 @@ def verify_and_evaluate_candidate(
         rec["drop_reason"] = f"below_100m_ev_floor:${ev / Decimal('1000000'):.1f}M"
         return rec, []
 
-    ebit = Decimal(str(inc_data["val"])) + int_val + Decimal(str(tax_data["val"]))
-    ebitda = ebit + Decimal(str(da_data["val"]))
+    ebit = compute_ebit(
+        Decimal(str(inc_data["val"])),
+        int_val,
+        Decimal(str(tax_data["val"])),
+    )
+    ebitda = compute_ebitda(ebit, Decimal(str(da_data["val"])))
     ev_tier = _ev_tier(ev)
     ebitda_positive = ebitda > 0
 

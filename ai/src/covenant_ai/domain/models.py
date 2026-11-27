@@ -9,7 +9,7 @@ ValuationResult   -- output of indicative_valuation(): EV range, multiples,
                      excluded peers, outlier flags, assumptions, and limitations.
 """
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from uuid import uuid4
@@ -273,7 +273,7 @@ class EbitdaAdjustmentSchedule(BaseModel):
         period_end: date | None = None,
     ) -> list[FinancialDatapoint]:
         """Convert schedule into traceable ledger datapoints."""
-        now = datetime.now()
+        now = datetime.now(UTC)
         pts: list[FinancialDatapoint] = [
             FinancialDatapoint(
                 metric="reported_ebitda",
@@ -415,6 +415,9 @@ class PeerFinancials(BaseModel):
     preferred_equity: Decimal = Decimal(0)
     non_controlling_interests: Decimal = Decimal(0)
     revenue: Decimal | None = None
+    equity_method_income: Decimal | None = None
+    equity_method_investments: Decimal | None = None
+    equity_method_pre_excluded_at_source: bool = False
 
 
 class ValuationResult(BaseModel):

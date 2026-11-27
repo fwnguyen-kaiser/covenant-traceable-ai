@@ -60,8 +60,8 @@ def test_edgar_provider_loads_crm_from_cache(edgar_provider_factory):
 
 
 def test_edgar_provider_composite_da_intuit(edgar_provider_factory):
-    """Verify Intuit (INTU) composite D&A (Depreciation + AmortizationOfIntangibles)."""
-    pts = edgar_provider_factory("INTU").get_peer_financials("INTU", period="FY")
+    """Verify Intuit (INTU) composite D&A (Depreciation + AmortizationOfIntangibles) on legacy v2."""
+    pts = edgar_provider_factory("INTU", method_version="cover-gaap-v2").get_peer_financials("INTU", period="FY")
     by_metric = {d.metric: d for d in pts}
 
     # Composite D&A should be Depreciation (187M) + Amortization (485M) = 672M
@@ -111,10 +111,14 @@ def test_edgar_provider_requires_a_closing_price_snapshot():
 
 
 def test_edgar_provider_rejects_ticker_without_latest_10k_share_fact():
-    provider = EdgarMarketDataProvider(snapshot_prices={})
-
+    provider_v2 = EdgarMarketDataProvider(snapshot_prices={}, method_version="cover-gaap-v2")
     with pytest.raises(KeyError, match="no shares-outstanding fact in the latest 10-K"):
-        provider.get_peer_financials("PTC", period="FY")
+        provider_v2.get_peer_financials("PTC", period="FY")
+
+    # Under default cover-gaap-v3, PTC's gross-only interest is blocked even earlier as UNRESOLVED_SCOPE.
+    provider_v3 = EdgarMarketDataProvider(snapshot_prices={})
+    with pytest.raises(KeyError, match="without net interest or same-accession pure interest income"):
+        provider_v3.get_peer_financials("PTC", period="FY")
 
 
 def test_edgar_provider_unknown_ticker_raises_key_error(edgar_provider):
@@ -127,7 +131,7 @@ def test_edgar_provider_inverts_net_interest_tags(edgar_provider_factory):
     """Verify net interest XBRL tags (negative=expense, positive=income) are inverted
     to match bridge.py's expense-positive convention, including InterestIncomeExpenseNonoperatingNet.
     """
-    provider = edgar_provider_factory("WWW", "MANH", "GIS")
+    provider = edgar_provider_factory("WWW", "GIS")
 
     www_pts = {d.metric: d for d in provider.get_peer_financials("WWW", period="FY")}
     assert www_pts["interest_expense_net"].value == Decimal("32800000")
@@ -135,7 +139,9 @@ def test_edgar_provider_inverts_net_interest_tags(edgar_provider_factory):
     www_peer, _ = build_peer_financials(list(www_pts.values()), "WWW", period="FY")
     assert www_peer.ebitda == Decimal("180200000")
 
-    manh_pts = {d.metric: d for d in provider.get_peer_financials("MANH", period="FY")}
+    # MANH reports only operating leases without core debt; verify net-interest inversion via v2 legacy path.
+    provider_v2 = edgar_provider_factory("MANH", method_version="cover-gaap-v2")
+    manh_pts = {d.metric: d for d in provider_v2.get_peer_financials("MANH", period="FY")}
     assert manh_pts["interest_expense_net"].value == Decimal("-4389000")
     assert "sign inverted" in manh_pts["interest_expense_net"].source_ref
 
@@ -146,28 +152,21 @@ def test_edgar_provider_inverts_net_interest_tags(edgar_provider_factory):
 
 
 def test_edgar_provider_debt_no_double_count_and_cap_lease(edgar_provider_factory):
-    """Verify mutually exclusive debt + lease extraction across differing XBRL filings."""
-    provider = edgar_provider_factory("CRM", "CPB", "DXC", "LII", "YUM")
+    """Verify mutually exclusive debt + lease extraction on default v3 (ex op-lease) and legacy v2."""
+    provider_v3 = edgar_provider_factory("CRM", "CPB", "DXC", "LII", "YUM")
+    assert {d.metric: d for d in provider_v3.get_peer_financials("CRM", "FY")}["total_debt"].value == Decimal("14974000000")
+    assert {d.metric: d for d in provider_v3.get_peer_financials("CPB", "FY")}["total_debt"].value == Decimal("7137000000")
+    assert {d.metric: d for d in provider_v3.get_peer_financials("DXC", "FY")}["total_debt"].value == Decimal("3552000000")
+    assert {d.metric: d for d in provider_v3.get_peer_financials("LII", "FY")}["total_debt"].value == Decimal("1388400000")
+    assert {d.metric: d for d in provider_v3.get_peer_financials("YUM", "FY")}["total_debt"].value == Decimal("12014000000")
 
-    # CRM: LongTermDebtNoncurrent (10.439B) + LongTermDebtCurrent (4B) + leases (3.272B), no 4B double count
-    crm_pts = {d.metric: d for d in provider.get_peer_financials("CRM", period="FY")}
-    assert crm_pts["total_debt"].value == Decimal("17711000000")
-
-    # CPB: includes LongTermDebtAndCapitalLeaseObligations (6.16B) + DebtCurrent (977M) + op leases (313M)
-    cpb_pts = {d.metric: d for d in provider.get_peer_financials("CPB", period="FY")}
-    assert cpb_pts["total_debt"].value == Decimal("7450000000")
-
-    # DXC: includes LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities (3.552B) + op leases (695M)
-    dxc_pts = {d.metric: d for d in provider.get_peer_financials("DXC", period="FY")}
-    assert dxc_pts["total_debt"].value == Decimal("4247000000")
-
-    # LII: includes CommercialPaper (226M) + LongTermDebtAndCapitalLeaseObligations (1.1441B) + current (18.3M) + op leases (382.3M)
-    lii_pts = {d.metric: d for d in provider.get_peer_financials("LII", period="FY")}
-    assert lii_pts["total_debt"].value == Decimal("1770700000")
-
-    # YUM: includes combined OperatingLeaseLiability (1.279B) + ShortTermBorrowings (38M) + LT debt/cap lease (11.976B)
-    yum_pts = {d.metric: d for d in provider.get_peer_financials("YUM", period="FY")}
-    assert yum_pts["total_debt"].value == Decimal("13293000000")
+    provider_v2 = edgar_provider_factory("CRM", "CPB", "DXC", "LII", "YUM", method_version="cover-gaap-v2")
+    # Legacy v2: includes ASC 842 operating lease liabilities
+    assert {d.metric: d for d in provider_v2.get_peer_financials("CRM", "FY")}["total_debt"].value == Decimal("17711000000")
+    assert {d.metric: d for d in provider_v2.get_peer_financials("CPB", "FY")}["total_debt"].value == Decimal("7450000000")
+    assert {d.metric: d for d in provider_v2.get_peer_financials("DXC", "FY")}["total_debt"].value == Decimal("4247000000")
+    assert {d.metric: d for d in provider_v2.get_peer_financials("LII", "FY")}["total_debt"].value == Decimal("1770700000")
+    assert {d.metric: d for d in provider_v2.get_peer_financials("YUM", "FY")}["total_debt"].value == Decimal("13293000000")
 
 
 def test_edgar_provider_cash_sti_not_double_counted(monkeypatch):
@@ -210,7 +209,7 @@ def test_edgar_provider_cash_sti_not_double_counted(monkeypatch):
                         ]
                     }
                 },
-                "InterestExpense": {
+                "InterestIncomeExpenseNet": {
                     "units": {
                         "USD": [
                             {
@@ -220,7 +219,20 @@ def test_edgar_provider_cash_sti_not_double_counted(monkeypatch):
                                 "end": "2025-12-31",
                                 "accn": "0001-26-000001",
                                 "filed": "2026-02-01",
-                                "val": 10,
+                                "val": -10,
+                            }
+                        ]
+                    }
+                },
+                "LongTermDebtNoncurrent": {
+                    "units": {
+                        "USD": [
+                            {
+                                "form": "10-K",
+                                "end": "2025-12-31",
+                                "accn": "0001-26-000001",
+                                "filed": "2026-02-01",
+                                "val": 100,
                             }
                         ]
                     }
@@ -359,9 +371,20 @@ def test_edgar_provider_loads_ticker_map_with_exchange_cache_present(tmp_path):
 
 
 def test_edgar_provider_real_ltm_calendarization_and_10k_mrq_case():
-    """Verify real SEC LTM = FY + Curr_YTD - Prior_YTD (ADBE Q3) and FY==LTM (SBUX 10-K >= 10-Q)."""
-    provider = EdgarMarketDataProvider()
-    adbe_ltm = {d.metric: d for d in provider.get_peer_financials("ADBE", period="LTM")}
+    """Verify real SEC LTM = FY + Curr_YTD - Prior_YTD (ADSK on v3, ADBE on v2) and FY==LTM (CPB v3, SBUX v2)."""
+    provider_v3 = EdgarMarketDataProvider()
+    cpb_fy = {d.metric: d for d in provider_v3.get_peer_financials("CPB", period="FY")}
+    cpb_ltm = {d.metric: d for d in provider_v3.get_peer_financials("CPB", period="LTM")}
+    assert cpb_ltm["income_continuing_ops"].value == cpb_fy["income_continuing_ops"].value
+    assert cpb_ltm["market_cap"].value == cpb_fy["market_cap"].value
+    assert "no subsequent 10-Q" in cpb_ltm["income_continuing_ops"].source_ref
+
+    adsk_ltm = {d.metric: d for d in provider_v3.get_peer_financials("ADSK", period="LTM")}
+    assert adsk_ltm["income_continuing_ops"].period == "LTM"
+    assert "10-Q" in adsk_ltm["market_cap"].source_ref
+
+    provider_v2 = EdgarMarketDataProvider(method_version="cover-gaap-v2")
+    adbe_ltm = {d.metric: d for d in provider_v2.get_peer_financials("ADBE", period="LTM")}
     assert adbe_ltm["income_continuing_ops"].period == "LTM"
     assert adbe_ltm["income_continuing_ops"].period_end == date(2026, 8, 28)
     # 7130M + 5428M - 5274M = 7284M
@@ -370,8 +393,8 @@ def test_edgar_provider_real_ltm_calendarization_and_10k_mrq_case():
     adbe_peer, _ = build_peer_financials(list(adbe_ltm.values()), "ADBE", period="LTM")
     assert adbe_peer.ebitda > Decimal("9000000000")
 
-    sbux_fy = {d.metric: d for d in provider.get_peer_financials("SBUX", period="FY")}
-    sbux_ltm = {d.metric: d for d in provider.get_peer_financials("SBUX", period="LTM")}
+    sbux_fy = {d.metric: d for d in provider_v2.get_peer_financials("SBUX", period="FY")}
+    sbux_ltm = {d.metric: d for d in provider_v2.get_peer_financials("SBUX", period="LTM")}
     assert sbux_ltm["income_continuing_ops"].value == sbux_fy["income_continuing_ops"].value
     assert sbux_ltm["market_cap"].value == sbux_fy["market_cap"].value
     assert "no subsequent 10-Q" in sbux_ltm["income_continuing_ops"].source_ref
@@ -408,14 +431,17 @@ def test_edgar_provider_ltm_rejects_standalone_quarter_and_mixed_tags(monkeypatc
                         ]
                     }
                 },
-                "InterestExpense": {
+                "InterestIncomeExpenseNet": {
                     "units": {
                         "USD": [
-                            {"form": "10-K", "fp": "FY", "start": "2025-01-01", "end": "2025-12-31", "accn": "01", "filed": "2026-02-01", "val": 50},
-                            {"form": "10-Q", "fp": "Q2", "start": "2026-01-01", "end": "2026-06-30", "accn": "02", "filed": "2026-07-15", "val": 30},
-                            {"form": "10-Q", "fp": "Q2", "start": "2025-01-01", "end": "2025-06-30", "accn": "02", "filed": "2026-07-15", "val": 25},
+                            {"form": "10-K", "fp": "FY", "start": "2025-01-01", "end": "2025-12-31", "accn": "01", "filed": "2026-02-01", "val": -50},
+                            {"form": "10-Q", "fp": "Q2", "start": "2026-01-01", "end": "2026-06-30", "accn": "02", "filed": "2026-07-15", "val": -30},
+                            {"form": "10-Q", "fp": "Q2", "start": "2025-01-01", "end": "2025-06-30", "accn": "02", "filed": "2026-07-15", "val": -25},
                         ]
                     }
+                },
+                "LongTermDebtNoncurrent": {
+                    "units": {"USD": [{"form": "10-Q", "end": "2026-06-30", "accn": "02", "filed": "2026-07-15", "val": 100}]}
                 },
                 "DepreciationAndAmortization": {
                     "units": {
@@ -493,14 +519,17 @@ def test_edgar_provider_restated_10qa_overrides_orig_accn_and_ltm_da_parity(monk
                         ]
                     }
                 },
-                "InterestExpense": {
+                "InterestIncomeExpenseNet": {
                     "units": {
                         "USD": [
-                            {"form": "10-K", "fp": "FY", "start": "2025-01-01", "end": "2025-12-31", "accn": "fy-01", "filed": "2026-02-01", "val": 50},
-                            {"form": "10-Q", "fp": "Q2", "start": "2026-01-01", "end": "2026-06-30", "accn": "q-02", "filed": "2026-07-15", "val": 30},
-                            {"form": "10-Q", "fp": "Q2", "start": "2025-01-01", "end": "2025-06-30", "accn": "q-02", "filed": "2026-07-15", "val": 25},
+                            {"form": "10-K", "fp": "FY", "start": "2025-01-01", "end": "2025-12-31", "accn": "fy-01", "filed": "2026-02-01", "val": -50},
+                            {"form": "10-Q", "fp": "Q2", "start": "2026-01-01", "end": "2026-06-30", "accn": "q-02", "filed": "2026-07-15", "val": -30},
+                            {"form": "10-Q", "fp": "Q2", "start": "2025-01-01", "end": "2025-06-30", "accn": "q-02", "filed": "2026-07-15", "val": -25},
                         ]
                     }
+                },
+                "LongTermDebtNoncurrent": {
+                    "units": {"USD": [{"form": "10-Q", "end": "2026-06-30", "accn": "q-02", "filed": "2026-07-15", "val": 100}]}
                 },
                 "Depreciation": {
                     "units": {

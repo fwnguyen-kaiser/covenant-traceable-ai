@@ -73,6 +73,9 @@ class ValuationState(TypedDict):
     # Computation & Quality check
     peer_financials: NotRequired[list[PeerFinancials]]
     failed_peers: NotRequired[dict[str, str]]
+    failed_peer_details: NotRequired[dict[str, dict[str, Any]]]
+    screening_failures: NotRequired[dict[str, dict[str, Any]]]
+    method_version: NotRequired[str]
     quality_issues: NotRequired[list[str]]
     needs_retry: NotRequired[bool]
     insufficient_peers: NotRequired[bool]

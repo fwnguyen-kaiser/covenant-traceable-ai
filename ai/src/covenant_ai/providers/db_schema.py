@@ -67,6 +67,7 @@ SCHEMA_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE company_profiles ALTER COLUMN total_debt DROP DEFAULT;",
     "ALTER TABLE company_profiles ALTER COLUMN cash DROP DEFAULT;",
     "ALTER TABLE peer_companies ADD COLUMN IF NOT EXISTS baseline_id UUID;",
+    "CREATE TABLE IF NOT EXISTS peer_baseline_batches (id UUID PRIMARY KEY, method_version TEXT NOT NULL);",
     "ALTER TABLE peer_companies ADD COLUMN IF NOT EXISTS baseline_errors JSONB;",
     "ALTER TABLE financial_datapoints ADD COLUMN IF NOT EXISTS baseline_id UUID;",
     """DO $$ DECLARE c record; BEGIN

@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
 );
 
 -- 5. PEER COMPANIES (Verified universe from SEC EDGAR)
+CREATE TABLE IF NOT EXISTS peer_baseline_batches (
+    id UUID PRIMARY KEY,
+    method_version TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS peer_companies (
     baseline_id UUID,
     baseline_errors JSONB,
