@@ -14,6 +14,7 @@ from langgraph.types import Command, Overwrite
 from psycopg.conninfo import conninfo_to_dict
 
 from covenant_ai.app.errors import (
+    ConflictAppError,
     DuplicateThreadError,
     ForbiddenActionError,
     LocalPolicyError,
@@ -400,6 +401,7 @@ class ValuationRunnerService:
         thread_id: str,
         decision: Any,
         *,
+        expected_prompt_id: str | None = None,
         explain_mode: str | None = None,
         actor_id: UUID | None = None,
     ) -> RunStepResult:
@@ -435,6 +437,8 @@ class ValuationRunnerService:
                 raise ValueError(f"Thread {thread_id!r} is already finalized ({db_status}).")
 
             pending = _extract_pending_prompt(thread_id, snap)
+            if expected_prompt_id is not None and (pending is None or pending.prompt_id != expected_prompt_id):
+                raise ConflictAppError("The pending question changed before this reply could be applied.")
             if pending is None:
                 if snap.next:
                     state = app.invoke(None, config=config)

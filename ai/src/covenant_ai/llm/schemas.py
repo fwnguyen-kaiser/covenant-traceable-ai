@@ -103,6 +103,13 @@ class NarrativeDraft(BaseModel):
     peer_and_operational_takeaways: str
     key_risks_and_caveats: str
 
+    @field_validator("valuation_positioning", "peer_and_operational_takeaways", "key_risks_and_caveats")
+    @classmethod
+    def require_section_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Each commentary section must contain text.")
+        return value.strip()
+
 
 class SemanticAuditIssue(BaseModel):
     """Single semantic or factual discrepancy identified by the verifier."""

@@ -673,6 +673,29 @@ class TestP4NetInterestAndIncome:
         assert out_pok.failure is None
         assert next(d for d in out_pok.datapoints if d.metric == "interest_expense_net").value == Decimal("16000000")
 
+        # 6. Enriched pure interest & nonoperating MMF/interest-dividend income tags net cleanly on same accession
+        for suffix, inc_tag in (
+            ("op_nonop", "InterestIncomeOperatingAndNonoperating"),
+            ("int_div", "InvestmentIncomeInterestAndDividend"),
+        ):
+            d6 = tmp_path / f"pure_{suffix}"
+            p_pure = _build_offline_provider(
+                d6,
+                ticker=f"PR{suffix[:3].upper()}",
+                gaap=_base_gaap_fy(
+                    extra={
+                        "LongTermDebtNoncurrent": _usd([_instant(200_000_000)]),
+                        "InterestExpenseNonoperating": _usd([_duration(12_000_000)]),
+                        inc_tag: _usd([_duration(4_500_000)]),
+                    }
+                ),
+                dei=_base_dei(),
+                filings=[("10-K", "2025-12-31", "0001-26-000001")],
+            )
+            out_pure = p_pure.extract_peer_outcome(f"PR{suffix[:3].upper()}", "FY")
+            assert out_pure.failure is None
+            assert next(d for d in out_pure.datapoints if d.metric == "interest_expense_net").value == Decimal("7500000")
+
 
 class TestP4MultiClassShares:
     """Alphabet-style unlisted class protection, double-count rejection, and multi-class summation."""

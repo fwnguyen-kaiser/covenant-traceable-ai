@@ -168,6 +168,7 @@ def _check_mandatory_disclosures(
             )
 
     for code, terms in {
+        "equity_method_exposure": ("equity method", "equity-method", "affiliate earnings", "affiliate investment"),
         "nci_material": ("nci", "non-controlling", "noncontrolling"),
         "small_peer_count": ("small cohort", "small peer", "limited peer", "few peers", "thin cohort"),
         "excluded_or_failed_peers": ("excluded", "failed", "omitted peer", "disqualified"),
@@ -212,6 +213,14 @@ def run_deterministic_audit(
             )
         )
     findings.extend(_check_stray_numbers(raw_template))
+    if "implied_ev_mid" in fact_pack.facts and not re.search(r"\{\{fact:implied_ev_(?:mid|low|high)\}\}", raw_template):
+        findings.append(AuditFinding(rule="missing_enterprise_value", severity="fail",
+                                     message="Valuation commentary must cite a frozen enterprise value."))
+    if re.search(r"\bequity\s+(?:value|midpoint|range|valuation)\b"
+                 r"(?:\s+(?:is|of|at|from|equals|midpoint|estimated|between))*\s*[:=]?\s*\{\{fact:implied_ev_",
+                 raw_template, re.I):
+        findings.append(AuditFinding(rule="equity_ev_mismatch", severity="fail",
+                                     message="An enterprise value is presented as an equity value."))
     findings.extend(_check_directional_consistency(raw_template, rendered_md, fact_pack))
     findings.extend(_check_period_parity(raw_template, rendered_md, fact_pack))
     findings.extend(_check_mandatory_disclosures(raw_template, rendered_md, fact_pack))
@@ -263,6 +272,9 @@ def audit_narrative(
                 )
             )
             return AuditVerdict.WARN, findings
+        if sem.verdict == AuditVerdict.FAIL and not sem.issues:
+            findings.append(AuditFinding(rule="semantic_fail", severity="fail",
+                                         message="Semantic reviewer rejected the draft without issue details."))
         if sem.verdict == AuditVerdict.WARN and not sem.issues:
             findings.append(AuditFinding(rule="semantic_warn", severity="warn",
                                          message="Semantic reviewer returned WARN without issue details."))

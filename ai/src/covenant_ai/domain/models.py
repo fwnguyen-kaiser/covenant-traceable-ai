@@ -373,6 +373,11 @@ class CompanyProfile(BaseModel):
     inference_provenance: dict[str, FieldInference] = Field(default_factory=dict)
     inconsistencies: list[str] = Field(default_factory=list)
 
+    @property
+    def revenue_model_verified(self) -> bool:
+        evidence = self.inference_provenance.get("revenue_model")
+        return evidence is None or evidence.quote_verified
+
     @model_validator(mode="before")
     @classmethod
     def extract_fiscal_year_from_period(cls, data: object) -> object:

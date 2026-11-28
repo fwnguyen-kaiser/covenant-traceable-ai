@@ -69,6 +69,14 @@ projectCovenant/
 
 ---
 
+## How the deal chat works
+
+The analyst starts a run from a company profile and answers the current question in the run's chat. Before selecting comparable companies, the analyst sees the reporting period, reported EBITDA, adjustments and normalized EBITDA. Each reply belongs to one question. If the browser closes after a reply is saved, reopening the run lets the analyst resume that reply.
+
+Structured intake works with the default installation. The optional free-text intake path requires a locally supplied model client. It checks proposed amounts against the analyst's words and asks for clarification when a correction changes the currency or reporting period. If extraction fails mid-run, the analyst can finish by entering the fields directly.
+
+Python computes the valuation. An optional local writer can describe the frozen results using references to specific figures. If the draft fails its checks, the report uses the deterministic explanation and records the reason. The analyst's chat confirmations and the reviewer's report approval are distinct actions.
+
 ## Role & Authorization Matrix (`covenant_ai.app.authz`)
 
 | Action | Analyst | Reviewer | Admin (`can_release_report=False`) | Admin (`report.release` + assigned `release_admin`) |

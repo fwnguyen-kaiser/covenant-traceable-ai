@@ -136,6 +136,7 @@ def test_p7_real_browser_e2e_chat_review_release_and_xlsx_download(tmp_path):
                 page_a2.wait_for_selector("#hitl-industry")
 
                 # Confirm industry -> peer_review
+                assert "Normalized EBITDA" in page_a2.locator("#chat-log").inner_text()
                 page_a2.click("#chat-prompt-box button[type='submit']")
                 page_a2.wait_for_selector("#hitl-peers")
 

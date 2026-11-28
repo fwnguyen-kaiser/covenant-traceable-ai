@@ -38,11 +38,19 @@ def _build_explain_user_prompt(
 
     profile = state.get("company_profile")
     if profile is not None:
+        if not profile.revenue_model_verified:
+            revenue_model_label = "Unspecified (unverified)"
+        else:
+            revenue_model_label = (
+                profile.revenue_model_type.value
+                if profile.revenue_model_type
+                else (profile.revenue_model or "Unspecified")
+            )
         sections.extend([
             "",
             "TARGET QUALITATIVE CONTEXT:",
             f"- Business Description: {profile.business_description or 'Not provided'}",
-            f"- Revenue Model: {profile.revenue_model_type.value if profile.revenue_model_type else (profile.revenue_model or 'Unspecified')}",
+            f"- Revenue Model: {revenue_model_label}",
             f"- Geography: {profile.geography}",
         ])
 

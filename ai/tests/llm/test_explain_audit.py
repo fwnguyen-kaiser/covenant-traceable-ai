@@ -279,3 +279,69 @@ def test_semantic_audit_exception_degrades_gracefully_with_warn_and_saves_valuat
     assert final["audit_fallback_used"] is True
     assert "Small scale caveat applies relative to peers." not in final["explanation"]
     assert "Tier-2 semantic audit LLM call failed (TimeoutError" in final["explanation"]
+
+
+def test_explain_prompt_masks_unverified_revenue_model_and_gemini_wires_timeout_ms(monkeypatch):
+    from covenant_ai.llm import gemini as gemini_mod
+    from covenant_ai.llm.narrative_agent import _build_explain_user_prompt
+
+    profile = CompanyProfile(
+        company_name="TrashHaul LLC",
+        industry=Industry.COMMERCIAL_SERVICES.value,
+        geography="US",
+        revenue=Decimal("24000000"),
+        ebitda=Decimal("3500000"),
+        revenue_model="recurring_subscription",
+        inference_provenance={
+            "revenue_model": FieldInference(
+                field_name="revenue_model",
+                value="recurring_subscription",
+                confidence=0.7,
+                evidence_quote="",
+                quote_verified=False,
+                source=InferenceSource.LLM_INFERRED,
+            )
+        },
+    )
+    pack = build_fact_pack(
+        {
+            "company_profile": profile,
+            "target_ebitda": Decimal("3500000"),
+            "target_period": "FY",
+            "valuation": {"ev_low": "28000000", "ev_mid": "32000000", "ev_high": "40000000", "multiples_used": {"WM": "10"}},
+        }
+    )
+    prompt = _build_explain_user_prompt(pack, {"company_profile": profile})
+    assert "Revenue Model: Unspecified (unverified)" in prompt
+    assert "Revenue Model: recurring_subscription" not in prompt
+
+    captured: dict[str, object] = {}
+
+    class _FakeGenAIClient:
+        def __init__(self, *, api_key, http_options=None):
+            captured["api_key"] = api_key
+            captured["http_options"] = http_options
+
+    monkeypatch.setattr(gemini_mod.genai, "Client", _FakeGenAIClient)
+    gemini_mod.GeminiClient(api_key="dummy-key", config=LLMConfig(timeout_s=12.5))
+    assert captured["api_key"] == "dummy-key"
+    assert getattr(captured["http_options"], "timeout", None) == 12500
+
+
+def test_ev_only_report_excludes_unverified_model_and_audits_equity_claim():
+    from covenant_ai.llm.audit_agent import run_deterministic_audit
+
+    profile = CompanyProfile(company_name="Example", industry=Industry.APPLICATION_SOFTWARE.value,
+                             geography="US", ebitda=Decimal("200"), revenue_model="subscription",
+                             inference_provenance={"revenue_model": FieldInference(
+                                 field_name="revenue_model", value="subscription", confidence=0.9,
+                                 evidence_quote="", quote_verified=False, source=InferenceSource.LLM_INFERRED,
+                             )})
+    app = create_valuation_graph(FakeProvider(FIXTURE), checkpointer=MemorySaver())
+    end = _run_to_end(app, profile, "ev-only-unverified")
+    assert "Target Revenue Model: subscription" not in end["explanation"]
+    pack = build_fact_pack(end)
+    assert "equity_inputs_missing" in pack.required_risk_topics
+    raw = "Equity value is {{fact:implied_ev_mid}}."
+    md, unknown = render_fact_placeholders(raw, pack)
+    assert "equity_ev_mismatch" in {f.rule for f in run_deterministic_audit(raw, md, pack, unknown)}

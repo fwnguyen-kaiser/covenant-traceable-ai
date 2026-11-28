@@ -8,11 +8,13 @@ Architecture:
     1. confirm_industry: confirm/edit industry classification.
     2. peer_review: review/modify the selected peer candidates.
 """
+import json
 from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
 import psycopg
+from pydantic import ValidationError
 from langgraph.types import interrupt
 
 from covenant_ai.domain.bridge import build_peer_financials, flag_peer
@@ -46,7 +48,7 @@ from covenant_ai.domain.valuation import (
 )
 from covenant_ai.graph.state import ValuationState
 from covenant_ai.llm.audit_agent import audit_narrative
-from covenant_ai.llm.client import LLMClient
+from covenant_ai.llm.client import LLMClient, require_local_client
 from covenant_ai.llm.fact_pack import (
     LockedFactPack,
     build_deterministic_takeaways,
@@ -84,15 +86,35 @@ def make_intake_node(llm_client: LLMClient | None = None):
         inconsistencies: list[str] = list(state.get("inconsistencies") or [])
         prov_json: dict[str, Any] = dict(state.get("intake_provenance") or {})
 
-        if raw_input and profile is None:
+        def request_structured_intake(reason: str) -> dict[str, Any]:
+            confirmed = dict(state.get("locked_intake_fields") or {})
+            missing = missing_required(confirmed)
+            fields = [q.id for q in missing]
+            questions = [q.prompt for q in missing]
+            if not confirmed.get("ebitda_period") and "ebitda_period" not in fields:
+                fields.append("ebitda_period")
+                questions.append("Which period do the figures cover, FY or LTM?")
+            return {
+                "intake_answers": confirmed, "intake_provenance": {}, "clarify_needed": True,
+                "clarify_payload": {"action": "intake_clarify", "structured": True, "error": reason,
+                                    "missing_fields": fields, "questions": questions},
+                "inconsistencies": list(dict.fromkeys([*inconsistencies, reason])),
+            }
+
+        structured_retry = bool((state.get("clarify_payload") or {}).get("structured"))
+        if raw_input and profile is None and not structured_retry:
             if llm_client is None:
-                raise ValueError("raw_input intake requires an active LLMClient")
-            prep = extract_intake_from_text(
-                llm_client,
-                raw_input,
-                existing_answers=intake_answers,
-                locked_overrides=state.get("locked_intake_fields"),
-            )
+                return request_structured_intake("The local extraction client is unavailable. Confirm the fields directly in USD.")
+            require_local_client(llm_client)
+            try:
+                prep = extract_intake_from_text(
+                    llm_client, raw_input, existing_answers=intake_answers,
+                    locked_overrides=state.get("locked_intake_fields"),
+                )
+            except Exception as exc:
+                return request_structured_intake(
+                    f"Local intake extraction failed ({type(exc).__name__}). Confirm the fields directly in USD."
+                )
             inconsistencies = list(dict.fromkeys([*inconsistencies, *prep.inconsistencies]))
             if prep.provenance:
                 prov_json = {k: v.model_dump(mode="json") for k, v in prep.provenance.items()}
@@ -108,10 +130,7 @@ def make_intake_node(llm_client: LLMClient | None = None):
             if prep.clarify_needed:
                 clarify_count = int(state.get("intake_clarify_count") or 0)
                 if clarify_count >= MAX_INTAKE_CLARIFY:
-                    raise ValueError(
-                        "Intake clarification exceeded maximum retries: "
-                        + "; ".join(prep.clarify_payload.get("questions") or [])
-                    )
+                    return request_structured_intake("Free-text clarification is incomplete. Confirm the fields directly in USD.")
                 return {
                     "intake_answers": json_answers,
                     "clarify_needed": True,
@@ -127,8 +146,10 @@ def make_intake_node(llm_client: LLMClient | None = None):
                     period_end=profile.period_end_date,
                 )
             )
-            intake_answers = json_answers
+            intake_answers = {k: v for k, v in json_answers.items() if k != "_currency_evidence"}
         elif intake_answers is not None and profile is None:
+            if raw_input and structured_retry and not intake_answers.get("ebitda_period"):
+                return request_structured_intake("Confirm the reporting period before continuing.")
             try:
                 profile, schedule = create_company_profile_from_intake(intake_answers)
             except ValueError as exc:
@@ -234,6 +255,11 @@ def intake_clarify_node(state: ValuationState) -> dict[str, Any]:
         locked_prev = dict(state.get("locked_intake_fields") or {})
         clarify_count = int(state.get("intake_clarify_count") or 0) + 1
 
+        if payload.get("structured") and isinstance(res, str):
+            try:
+                res = json.loads(res, parse_float=Decimal)
+            except ValueError:
+                pass  # Invalid text returns the same editable prompt below.
         if payload.get("structured") and not isinstance(res, dict):
             payload = {**payload, "error": "Supply corrected fields as a JSON object."}
             continue
@@ -312,7 +338,7 @@ def confirm_industry_node(state: ValuationState) -> dict[str, Any]:
         res = interrupt(payload)
         if isinstance(res, dict):
             res = res.get("confirmed_industry") or res.get("industry")
-        confirmed = res.strip() if isinstance(res, str) and res.strip() else proposed
+        confirmed = res.strip() if isinstance(res, str) else ""
         if confirmed in DEFAULT_CANDIDATE_POOL:
             updates: dict[str, Any] = {"industry_enum": confirmed, "industry_confirmed": True}
             if profile is not None and confirmed != profile.industry:
@@ -534,7 +560,7 @@ def peer_review_node(state: ValuationState) -> dict[str, Any]:
         elif isinstance(res, str) and res.strip():
             approved = _clean_tickers([s.strip() for s in res.split(",") if s.strip()])
         else:
-            approved = _clean_tickers(current)
+            approved = []
 
         outside = set(approved) - set(state.get("candidate_tickers") or [])
         rationale = res.get("rationale", {}) if isinstance(res, dict) else {}
@@ -795,7 +821,7 @@ def valuation_node(state: ValuationState) -> dict[str, Any]:
                 f"Customer Concentration Risk: Single largest customer accounts for "
                 f"{profile.customer_concentration_pct}% of revenue (>= 25% concentration threshold)."
             )
-        if profile.revenue_model:
+        if profile.revenue_model and profile.revenue_model_verified:
             result.limitations.append(f"Target Revenue Model: {profile.revenue_model}.")
         if profile.capex is not None and profile.revenue and profile.revenue > 0:
             capex_pct = (profile.capex / profile.revenue) * Decimal("100")

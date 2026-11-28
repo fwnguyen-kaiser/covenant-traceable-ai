@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 FACT_PATTERN = re.compile(r"\{\{fact:([a-zA-Z0-9_]+)\}\}")
 
 _RISK_DESCRIPTIONS: dict[str, str] = {
+    "equity_method_exposure": "Disclosed equity-method affiliate exposure requires manual review",
+    "equity_inputs_missing": "Target debt or cash is missing. Only enterprise value is available",
     "customer_concentration": "High customer concentration (>= 25% of revenue from largest customer)",
     "high_leverage_distressed": "High leverage / potential equity impairment when Net Debt approaches or exceeds implied EV",
     "lmm_size_spread": "Lower Middle Market (LMM) size spread vs significantly larger public comparables",
@@ -267,8 +269,9 @@ def build_fact_pack(state: ValuationState) -> LockedFactPack:
     if val.get("ev_low") is not None and val.get("target_net_debt") is not None:
         if Decimal(str(val["target_net_debt"])) > 0 and Decimal(str(val["target_net_debt"])) >= Decimal(str(val["ev_low"])):
             required_risks.append("high_leverage_distressed")
-    if "nci_material" in (val.get("risk_codes") or []):
-        required_risks.append("nci_material")
+    for topic in ("nci_material", "equity_method_exposure", "equity_inputs_missing"):
+        if topic in (val.get("risk_codes") or []):
+            required_risks.append(topic)
     if any(lim.startswith("LMM Size-Tier Spread Note") for lim in limitations):
         required_risks.append("lmm_size_spread")
     if len(multiples) < 5:

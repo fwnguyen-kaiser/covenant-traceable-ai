@@ -183,6 +183,30 @@ window.CovenantApp = (function () {
       title.innerHTML = "<strong>Pending step:</strong> <code>" + p.action + "</code>";
       form.appendChild(title);
 
+      if (p.pending_reply) {
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "Resume previously sent reply";
+        retry.onclick = async () => {
+          retry.disabled = true;
+          try {
+            const updated = await apiFetch("/api/runs/" + data.run_id + "/messages", {
+              method: "POST", body: JSON.stringify(p.pending_reply),
+            });
+            renderChat(updated);
+            if (updated.has_packet) await loadReport(data.run_id);
+          } catch (err) {
+            showError("chat-error", err.message);
+            await loadRun(data.run_id);
+          } finally {
+            retry.disabled = false;
+          }
+        };
+        form.appendChild(retry);
+        box.appendChild(form);
+        return;
+      }
+
       const payload = p.payload || {};
       if (p.action === "confirm_industry") {
         const sel = document.createElement("select");
@@ -235,6 +259,10 @@ window.CovenantApp = (function () {
             if (field === "ebitda_period") {
               const sel = document.createElement("select");
               sel.dataset.clarifyField = "ebitda_period";
+              sel.required = true;
+              const prompt = new Option("Choose a reporting period", "", true, true);
+              prompt.disabled = true;
+              sel.add(prompt);
               for (const optVal of ["FY", "LTM"]) {
                 const opt = document.createElement("option");
                 opt.value = optVal;
@@ -252,7 +280,8 @@ window.CovenantApp = (function () {
         } else {
           const inp = document.createElement("input");
           inp.id = "hitl-clarify-text";
-          inp.placeholder = "Enter clarification or JSON fields";
+          inp.required = true;
+          inp.placeholder = payload.structured ? 'Correct fields, e.g. {"revenue":"12000000"}' : "Enter clarification";
           form.appendChild(inp);
         }
       }

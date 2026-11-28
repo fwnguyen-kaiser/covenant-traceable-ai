@@ -43,6 +43,8 @@ TAG_INTEREST_EXPENSE: tuple[str, ...] = TAG_INTEREST_EXPENSE_GROSS + TAG_INTERES
 # Pure interest income tags paired strictly on same filing accession & period in v3.
 TAG_INTEREST_INCOME_PURE: tuple[str, ...] = (
     "InvestmentIncomeInterest",
+    "InvestmentIncomeInterestAndDividend",
+    "InterestIncomeOperatingAndNonoperating",
     "InterestIncomeDepositsWithFinancialInstitutions",
     "InterestIncomeOperating",
     "InterestIncomeOther",

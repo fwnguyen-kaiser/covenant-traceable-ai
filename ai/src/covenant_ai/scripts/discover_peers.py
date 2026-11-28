@@ -22,22 +22,17 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from covenant_ai.domain.bridge import compute_ebit, compute_ebitda
+from covenant_ai.domain.bridge import build_peer_financials
+from covenant_ai.domain.evidence import DEFAULT_METHOD_VERSION, normalize_method_version
 from covenant_ai.domain.industry import INDUSTRIES, Industry
+from covenant_ai.domain.valuation import enterprise_value
 from covenant_ai.providers.edgar import (
     ANNUAL_FORMS,
-    QUARTERLY_FORMS,
-    TAG_CASH,
-    TAG_INCOME_CONTINUING,
-    TAG_INTEREST_EXPENSE_GROSS,
-    TAG_INTEREST_INCOME_EXPENSE_NET,
-    TAG_REVENUE,
-    TAG_SHORT_TERM_INVESTMENTS,
-    TAG_TAX_EXPENSE,
     EdgarMarketDataProvider,
     _load_price_snapshot_index,
 )
-from covenant_ai.providers.edgar_client import EdgarClient
+from covenant_ai.providers.edgar_client import EdgarClient, default_urllib_transport
+from covenant_ai.providers.edgar_manifest import ProviderMode
 from covenant_ai.providers.market_calendar import (
     cover_price_session,
     parse_yahoo_chart_closes,
@@ -59,10 +54,10 @@ TIGHT_INDUSTRIES = {
 }
 
 # Target caps per industry: positive EBITDA + separate EV/Sales-only cohort
-POS_TARGET_BROAD = 24
-POS_TARGET_TIGHT = 18
-NEG_EBITDA_SALES_CAP = 6
-MAX_CHECKED_PER_INDUSTRY = 120
+POS_TARGET_BROAD = 36
+POS_TARGET_TIGHT = 28
+NEG_EBITDA_SALES_CAP = 8
+MAX_CHECKED_PER_INDUSTRY = 260
 
 
 def _ev_tier(ev: Decimal) -> str:
@@ -132,7 +127,7 @@ def discover_sic_tickers_from_sec(
     sic_codes: tuple[str, ...],
     major_by_cik: dict[str, dict[str, Any]],
     user_agent: str,
-    page_offsets: tuple[int, ...] = (0, 100, 300, 600, 1000, 1500),
+    page_offsets: tuple[int, ...] = (0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1200, 1500),
 ) -> list[str]:
     """Query browse-edgar Atom XML across industry SICs and interleave round-robin."""
     ns = {"atom": "http://www.w3.org/2005/Atom"}
@@ -232,6 +227,24 @@ def fetch_yahoo_daily_closes(
     return parse_yahoo_chart_closes(raw, ticker, f"https://query1.finance.yahoo.com/v8/finance/chart/{safe_t}")
 
 
+def _make_cached_yahoo_transport(cache_dir: Path):
+    """Wrap Yahoo Finance daily close fetches with local disk caching and polite throttling."""
+
+    def _transport(url: str, headers: dict[str, str], timeout: float) -> bytes:
+        if "finance.yahoo.com/v8/finance/chart/" in url:
+            raw_sym = url.rsplit("/", 1)[-1].split("?", 1)[0]
+            return _fetch_bytes_cached(
+                cache_dir,
+                f"yahoo_chart_3y_{raw_sym}.json",
+                url,
+                headers=headers,
+                sleep_sec=YAHOO_SLEEP,
+            )
+        return default_urllib_transport(url, headers, timeout)
+
+    return _transport
+
+
 def verify_and_evaluate_candidate(
     provider: EdgarMarketDataProvider,
     ticker: str,
@@ -240,12 +253,17 @@ def verify_and_evaluate_candidate(
     existing_snapshots: dict[tuple[str, date], tuple[Decimal, str]],
     spy_trading_dates_loader=None,
 ) -> tuple[dict[str, Any], list[tuple[str, date, Decimal, str]]]:
-    """Verify a candidate against SEC submissions, XBRL GAAP rules, and Yahoo close prices.
+    """Verify a candidate against SEC submissions, provider GAAP rules, and Yahoo close prices.
 
     Returns (verification_record, new_snapshot_rows).
     """
     ticker = ticker.upper().strip()
-    rec: dict[str, Any] = {"ticker": ticker, "verified": False, "drop_reason": None}
+    rec: dict[str, Any] = {
+        "ticker": ticker,
+        "verified": False,
+        "v3_verified": False,
+        "drop_reason": None,
+    }
     cik_int = provider._ticker_to_cik.get(ticker)
     if cik_int is None:
         rec["drop_reason"] = "ticker_not_in_sec_list"
@@ -274,155 +292,63 @@ def verify_and_evaluate_candidate(
         rec["drop_reason"] = f"sic_mismatch:{sic}"
         return rec, []
 
-    facts = provider._get_company_facts(cik_int).get("facts", {})
-    gaap = facts.get("us-gaap", {})
-    dei = facts.get("dei", {})
+    # Ensure provider price_store caches Yahoo chart requests and resolves SPY trading dates cleanly.
+    if not provider.offline and spy_trading_dates_loader is not None and provider.price_store._spy_trading_dates is None:
+        spy_dates = spy_trading_dates_loader()
+        if spy_dates:
+            provider.price_store._spy_trading_dates = set(spy_dates)
+    prev_allow_yahoo = provider.price_store.allow_on_demand_yahoo
+    if not provider.offline and not prev_allow_yahoo:
+        provider.price_store.allow_on_demand_yahoo = True
 
-    inc_units = provider._find_annual_units(gaap, TAG_INCOME_CONTINUING)
-    tax_units = provider._find_annual_units(gaap, TAG_TAX_EXPENSE)
-    gross_int = provider._find_annual_units(gaap, TAG_INTEREST_EXPENSE_GROSS)
-    net_int = provider._find_annual_units(gaap, TAG_INTEREST_INCOME_EXPENSE_NET)
-    da_facts, da_basis_map = provider.fact_reader.find_da_annual_facts(gaap, allow_partial=False)
-    da_units = {k: v.to_legacy_dict() for k, v in da_facts.items()}
+    before_keys = set(provider.price_store._snapshot_index)
+    try:
+        fy_outcome = provider.extract_peer_outcome(ticker, "FY")
+        if fy_outcome.failure is not None:
+            rec["drop_reason"] = f"{fy_outcome.failure.reason_code.value}:{fy_outcome.failure.message}"
+            return rec, []
 
-    if not inc_units or not tax_units or not da_units:
-        rec["drop_reason"] = "missing_core_gaap_income_or_da"
-        return rec, []
+        peer_fy, _ = build_peer_financials(fy_outcome.datapoints, ticker, "FY")
+        if (date.today() - peer_fy.period_end).days > MAX_AGE_DAYS:
+            rec["drop_reason"] = f"stale:{peer_fy.period_end.isoformat()}"
+            return rec, []
 
-    common_ends = set(inc_units) & set(tax_units) & set(da_units)
-    if not common_ends:
-        rec["drop_reason"] = "no_common_10k_period_end"
-        return rec, []
+        ev = enterprise_value(peer_fy)
+        if ev < EV_FLOOR_USD:
+            rec["drop_reason"] = f"below_100m_ev_floor:${ev / Decimal('1000000'):.1f}M"
+            return rec, []
 
-    latest_end = max(common_ends)
-    if (date.today() - date.fromisoformat(latest_end)).days > MAX_AGE_DAYS:
-        rec["drop_reason"] = f"stale:{latest_end}"
-        return rec, []
-
-    inc_data = inc_units[latest_end]
-    tax_data = tax_units[latest_end]
-    da_data = da_units[latest_end]
-
-    if latest_end in gross_int:
-        int_data = gross_int[latest_end]
-        int_val = Decimal(str(int_data["val"]))
-    elif latest_end in net_int:
-        int_data = net_int[latest_end]
-        int_val = -Decimal(str(int_data["val"]))
-    else:
-        rec["drop_reason"] = f"missing_interest_expense@{latest_end}"
-        return rec, []
-
-    cash_item = provider._find_instant_unit(gaap, TAG_CASH, latest_end, accn=inc_data["accn"])
-    if cash_item is None:
-        rec["drop_reason"] = f"missing_cash@{latest_end}"
-        return rec, []
-    cash_val = Decimal(str(cash_item["val"]))
-    if cash_item["tag"] != "CashCashEquivalentsAndShortTermInvestments":
-        sti_item = provider._find_instant_unit(gaap, TAG_SHORT_TERM_INVESTMENTS, latest_end, accn=inc_data["accn"])
-        if sti_item:
-            cash_val += Decimal(str(sti_item["val"]))
-
-    total_debt, _ = provider._extract_total_debt(gaap, latest_end, accn=inc_data["accn"])
-    pref_item = provider._find_instant_unit(
-        gaap, ("PreferredStockValue", "PreferredStockCarryingAmount"), latest_end, accn=inc_data["accn"]
-    )
-    pref_val = Decimal(str(pref_item["val"])) if pref_item else Decimal(0)
-    nci_item = provider._find_instant_unit(
-        gaap, ("MinorityInterest", "NoncontrollingInterestInVariableInterestEntity"), latest_end, accn=inc_data["accn"]
-    )
-    nci_val = Decimal(str(nci_item["val"])) if nci_item else Decimal(0)
-
-    rev_units = provider._find_annual_units(gaap, TAG_REVENUE)
-    if latest_end not in rev_units:
-        rec["drop_reason"] = f"missing_revenue@{latest_end}"
-        return rec, []
-    rev_val = Decimal(str(rev_units[latest_end]["val"]))
-    if rev_val <= 0:
-        rec["drop_reason"] = f"non_positive_revenue@{latest_end}"
-        return rec, []
-
-    share_entries = dei.get("EntityCommonStockSharesOutstanding", {}).get("units", {}).get("shares", [])
-    matching_shares = [
-        e for e in share_entries
-        if e.get("form") in ANNUAL_FORMS and e.get("accn") == inc_data["accn"] and e.get("end")
-    ]
-    if not matching_shares:
-        rec["drop_reason"] = "missing_10k_cover_shares"
-        return rec, []
-    share_entry = max(matching_shares, key=lambda e: e["end"])
-    shares_as_of = date.fromisoformat(share_entry["end"])
-    shares_val = Decimal(str(share_entry["val"]))
-    if shares_val <= 0:
-        rec["drop_reason"] = "non_positive_cover_shares"
-        return rec, []
-
-    # Resolve closing price per FIN-02 (exact trading day or documented <=5d prior close on weekend/holiday)
-    yahoo_cache: dict[date, tuple[Decimal, str]] | None = None
-    yahoo_error: list[Exception] = []
-    spy_cache: set[date] | None = None
-
-    def _load_yahoo() -> dict[date, tuple[Decimal, str]]:
-        nonlocal yahoo_cache
-        if yahoo_cache is None:
-            try:
-                yahoo_cache = fetch_yahoo_daily_closes(provider.cache_dir, ticker)
-            except Exception as exc:
-                yahoo_error.append(exc)
-                yahoo_cache = {}
-        return yahoo_cache
-
-    def _load_spy_dates() -> set[date] | None:
-        nonlocal spy_cache
-        if spy_trading_dates_loader is not None:
-            return spy_trading_dates_loader()
-        if spy_cache is None:
-            try:
-                spy_cache = set(fetch_yahoo_daily_closes(provider.cache_dir, "SPY"))
-            except Exception:
-                spy_cache = set()
-        return spy_cache or None
+        ltm_outcome = provider.extract_peer_outcome(ticker, "LTM")
+    finally:
+        provider.price_store.allow_on_demand_yahoo = prev_allow_yahoo
 
     new_snapshots: list[tuple[str, date, Decimal, str]] = []
-    fy_resolved = _resolve_cover_close(ticker, shares_as_of, existing_snapshots, _load_yahoo, _load_spy_dates)
-    if fy_resolved is None:
-        if yahoo_error:
-            rec["drop_reason"] = f"yahoo_fetch_error:{yahoo_error[0]}"
-        else:
-            rec["drop_reason"] = f"no_trading_close_on_{shares_as_of.isoformat()}"
-        return rec, []
-    resolved_fy_price_date, fy_price, fy_ref, fy_is_new = fy_resolved
-    if fy_is_new:
-        new_snapshots.append((ticker, resolved_fy_price_date, fy_price, fy_ref))
+    for key, (px, ref) in provider.price_store._snapshot_index.items():
+        if key not in before_keys and key not in existing_snapshots:
+            new_snapshots.append((key[0], key[1], px, ref))
 
-    # Optionally capture latest 10-Q / 10-Q/A share-count close price now for Section 2 LTM
-    q_shares = [
-        e for e in share_entries
-        if e.get("form") in QUARTERLY_FORMS and e.get("end") and date.fromisoformat(e["end"]) > shares_as_of
-    ]
-    if q_shares:
-        latest_q_share = max(q_shares, key=lambda e: e["end"])
-        q_as_of = date.fromisoformat(latest_q_share["end"])
-        q_resolved = _resolve_cover_close(ticker, q_as_of, existing_snapshots, _load_yahoo, _load_spy_dates)
-        if q_resolved is not None:
-            resolved_q_dt, q_price, q_ref, q_is_new = q_resolved
-            if q_is_new:
-                new_snapshots.append((ticker, resolved_q_dt, q_price, q_ref))
-
-    market_cap = shares_val * fy_price
-    ev = market_cap + total_debt + pref_val + nci_val - cash_val
-    if ev < EV_FLOOR_USD:
-        rec["drop_reason"] = f"below_100m_ev_floor:${ev / Decimal('1000000'):.1f}M"
-        return rec, []
-
-    ebit = compute_ebit(
-        Decimal(str(inc_data["val"])),
-        int_val,
-        Decimal(str(tax_data["val"])),
-    )
-    ebitda = compute_ebitda(ebit, Decimal(str(da_data["val"])))
+    by_metric = {dp.metric: dp for dp in fy_outcome.datapoints}
+    da_ref = by_metric["depreciation_amortization"].source_ref
+    da_basis = "composite_depreciation_plus_amortization" if "Depreciation+" in da_ref else "combined_da"
+    tags_used = {
+        m: by_metric[m].source_ref
+        for m in (
+            "income_continuing_ops",
+            "interest_expense_net",
+            "income_tax_expense",
+            "depreciation_amortization",
+            "revenue",
+            "total_debt",
+            "cash",
+        )
+        if m in by_metric
+    }
     ev_tier = _ev_tier(ev)
+    ebitda = peer_fy.ebitda
     ebitda_positive = ebitda > 0
+    rev_val = peer_fy.revenue or Decimal(0)
+    mc_date = peer_fy.market_cap_date.isoformat() if peer_fy.market_cap_date else None
+    ltm_ok = ltm_outcome.failure is None
 
     rationale = {
         "sic": sic,
@@ -433,30 +359,30 @@ def verify_and_evaluate_candidate(
         "ebitda_usd": str(ebitda),
         "revenue_usd": str(rev_val),
         "ebitda_positive": ebitda_positive,
-        "fy_period_end": latest_end,
-        "shares_as_of": shares_as_of.isoformat(),
-        "market_cap_date": resolved_fy_price_date.isoformat(),
-        "da_basis": da_basis_map[latest_end],
+        "fy_period_end": peer_fy.period_end.isoformat(),
+        "market_cap_date": mc_date,
+        "da_basis": da_basis,
+        "method_version": provider.method_version.value,
+        "ltm_verified": ltm_ok,
+        "warnings": list(fy_outcome.warnings),
     }
 
     rec.update(
         verified=True,
+        v3_verified=(provider.method_version.value == "cover-gaap-v3"),
+        method_version=provider.method_version.value,
+        ltm_verified=ltm_ok,
         assumed_zero=[],
-        latest_period_end=latest_end,
-        market_cap_date=resolved_fy_price_date.isoformat(),
-        tags_used={
-            "income_continuing_ops": inc_data["tag"],
-            "interest_expense_net": int_data["tag"],
-            "income_tax_expense": tax_data["tag"],
-            "depreciation_amortization": da_data["tag"],
-            "revenue": rev_units[latest_end]["tag"],
-        },
-        da_basis=da_basis_map[latest_end],
+        latest_period_end=peer_fy.period_end.isoformat(),
+        market_cap_date=mc_date,
+        tags_used=tags_used,
+        da_basis=da_basis,
         ev_tier=ev_tier,
         ev_ebitda_eligible=ebitda_positive,
         latest_ev_usd=str(ev),
         latest_ebitda_usd=str(ebitda),
         latest_revenue_usd=str(rev_val),
+        warnings=list(fy_outcome.warnings),
         selection_rationale=rationale,
     )
     return rec, new_snapshots
@@ -488,47 +414,53 @@ def _write_universe_report(report_path: Path, report: dict[str, list[dict[str, A
         "",
         f"**Generated:** {datetime.now(UTC).isoformat()}",
         "",
-        "| Industry | EV/EBITDA Verified | Small ($100M-$2B) | Mid ($2B-$10B) | Large (>$10B) | EV/Sales Only (EBITDA<=0) | Dropped |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Industry | `v3` EV/EBITDA Verified | Small ($100M-$2B) | Mid ($2B-$10B) | Large (>$10B) | `v3` EV/Sales Only | Legacy `v2` Kept | Dropped |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     tot_pos = 0
     tot_sales = 0
+    tot_legacy = 0
     for ind, items in report.items():
-        pos = [x for x in items if x.get("verified") and x.get("ev_ebitda_eligible")]
-        neg = [x for x in items if x.get("verified") and not x.get("ev_ebitda_eligible")]
+        pos = [x for x in items if x.get("verified") and x.get("v3_verified", True) and x.get("ev_ebitda_eligible")]
+        neg = [x for x in items if x.get("verified") and x.get("v3_verified", True) and not x.get("ev_ebitda_eligible")]
+        legacy = [x for x in items if x.get("verified") and not x.get("v3_verified", True)]
         dropped = [x for x in items if not x.get("verified")]
         sc = sum(1 for x in pos if x.get("ev_tier") == "small_cap")
         mc = sum(1 for x in pos if x.get("ev_tier") == "mid_cap")
         lc = sum(1 for x in pos if x.get("ev_tier") == "large_cap")
         tot_pos += len(pos)
         tot_sales += len(neg)
+        tot_legacy += len(legacy)
         lines.append(
-            f"| `{ind}` | {len(pos)} | {sc} | {mc} | {lc} | {len(neg)} | {len(dropped)} |"
+            f"| `{ind}` | {len(pos)} | {sc} | {mc} | {lc} | {len(neg)} | {len(legacy)} | {len(dropped)} |"
         )
     lines.extend([
         "",
-        f"**Total Verified Universe:** {tot_pos} `EV/EBITDA` peers + {tot_sales} `EV/Sales`-only peers = **{tot_pos + tot_sales} active peers across {len(report)} industries**.",
+        f"**Total `cover-gaap-v3` Verified Universe:** {tot_pos} `EV/EBITDA` peers + {tot_sales} `EV/Sales`-only peers = **{tot_pos + tot_sales} `v3` active peers** (+ {tot_legacy} legacy `cover-gaap-v2` peers retained for rollback parity across {len(report)} industries).",
         "",
         "## Per-Industry Highlights & Drop Breakdown",
         "",
     ])
     for ind, items in report.items():
         pos = sorted(
-            (x for x in items if x.get("verified") and x.get("ev_ebitda_eligible")),
+            (x for x in items if x.get("verified") and x.get("v3_verified", True) and x.get("ev_ebitda_eligible")),
             key=lambda x: Decimal(x["latest_ev_usd"]),
         )
-        neg = [x for x in items if x.get("verified") and not x.get("ev_ebitda_eligible")]
+        neg = [x for x in items if x.get("verified") and x.get("v3_verified", True) and not x.get("ev_ebitda_eligible")]
+        legacy = [x for x in items if x.get("verified") and not x.get("v3_verified", True)]
         dropped = [x for x in items if not x.get("verified")]
         lines.append(f"### `{ind}`")
         if pos:
             min_p, max_p = pos[0], pos[-1]
             lines.append(
-                f"- EV Range (`EV/EBITDA` pool): `${Decimal(min_p['latest_ev_usd'])/Decimal('1e6'):,.0f}M` (`{min_p['ticker']}`) "
+                f"- EV Range (`v3 EV/EBITDA` pool): `${Decimal(min_p['latest_ev_usd'])/Decimal('1e6'):,.0f}M` (`{min_p['ticker']}`) "
                 f"to `${Decimal(max_p['latest_ev_usd'])/Decimal('1e6'):,.0f}M` (`{max_p['ticker']}`)"
             )
-            lines.append("- Kept `EV/EBITDA`: " + ", ".join(f"`{x['ticker']}` ({x['ev_tier']})" for x in pos))
+            lines.append("- Kept `v3 EV/EBITDA`: " + ", ".join(f"`{x['ticker']}` ({x['ev_tier']})" for x in pos))
         if neg:
-            lines.append("- Kept `EV/Sales` only (`EBITDA <= 0`): " + ", ".join(f"`{x['ticker']}`" for x in neg))
+            lines.append("- Kept `v3 EV/Sales` only (`EBITDA <= 0`): " + ", ".join(f"`{x['ticker']}`" for x in neg))
+        if legacy:
+            lines.append("- Legacy `cover-gaap-v2` retained: " + ", ".join(f"`{x['ticker']}`" for x in legacy))
         if dropped:
             top_drops = "; ".join(f"`{x['ticker']}`: {x['drop_reason']}" for x in dropped[:12])
             lines.append(f"- Dropped ({len(dropped)} checked): {top_drops}")
@@ -537,13 +469,29 @@ def _write_universe_report(report_path: Path, report: dict[str, list[dict[str, A
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def run_discovery(only_industry: str | None = None, write_outputs: bool = True) -> dict[str, list[dict[str, Any]]]:
-    provider = EdgarMarketDataProvider(snapshot_prices={})
-    cache_dir = provider.cache_dir
+def run_discovery(
+    only_industry: str | None = None,
+    write_outputs: bool = True,
+    *,
+    method_version: str = DEFAULT_METHOD_VERSION,
+    pos_target_override: int | None = None,
+    preserve_legacy_verified: bool = True,
+) -> dict[str, list[dict[str, Any]]]:
+    eff_method = normalize_method_version(method_version).value
     ai_root = Path(__file__).resolve().parents[3]
     csv_path = ai_root / "market_price_snapshots.csv"
     veri_path = Path(__file__).resolve().parents[1] / "peer_verification.json"
     report_path = ai_root.parent / "docs" / "peer-universe-report.md"
+
+    provider = EdgarMarketDataProvider(
+        snapshot_csv=csv_path if csv_path.exists() else None,
+        snapshot_prices={} if not csv_path.exists() else None,
+        allow_on_demand_yahoo=True,
+        method_version=eff_method,
+        mode=ProviderMode.COLLECT,
+    )
+    cache_dir = provider.cache_dir
+    provider.price_store._raw_transport = _make_cached_yahoo_transport(cache_dir)
 
     existing_snapshots = _load_price_snapshot_index(csv_path) if csv_path.exists() else {}
     major_by_cik, major_by_ticker = load_major_exchange_directory(cache_dir, provider.user_agent)
@@ -558,36 +506,43 @@ def run_discovery(only_industry: str | None = None, write_outputs: bool = True) 
                 spy_dates_cache = set()
         return spy_dates_cache or None
 
-    # Merge discovered results onto existing peer_verification if running a single industry
+    _load_spy_dates()
+
     prior_report: dict[str, list[dict[str, Any]]] = {}
-    if only_industry and veri_path.exists():
+    if veri_path.exists():
         prior_report = json.loads(veri_path.read_text(encoding="utf-8")).get("industries", {})
 
     all_new_snapshots: list[tuple[str, date, Decimal, str]] = []
-    report: dict[str, list[dict[str, Any]]] = dict(prior_report)
+    report: dict[str, list[dict[str, Any]]] = dict(prior_report) if only_industry else {}
 
     for ind_enum, profile in INDUSTRIES.items():
         ind = ind_enum.value
         if only_industry and ind != only_industry:
             continue
 
-        pos_target = POS_TARGET_TIGHT if ind in TIGHT_INDUSTRIES else POS_TARGET_BROAD
+        prior_verified = {
+            str(r["ticker"]).upper().strip(): r
+            for r in prior_report.get(ind, [])
+            if r.get("verified")
+        }
+        pos_target = pos_target_override or (POS_TARGET_TIGHT if ind in TIGHT_INDUSTRIES else POS_TARGET_BROAD)
         priority_1 = [t.upper() for t in profile.candidate_tickers]
+        prior_tickers = list(prior_verified.keys())
         discovered = discover_sic_tickers_from_sec(
             cache_dir, profile.sic_codes, major_by_cik, provider.user_agent
         )
-        # Preserve priority 1 first, then append newly discovered SIC tickers matching major exchanges
-        queue = list(dict.fromkeys([t for t in priority_1] + [t for t in discovered if t in major_by_ticker]))
+        queue = list(dict.fromkeys([*priority_1, *prior_tickers, *(t for t in discovered if t in major_by_ticker)]))
 
         results: list[dict[str, Any]] = []
         pos_count = 0
         neg_count = 0
+        legacy_count = 0
         checked = 0
 
         for ticker in queue:
             if pos_count >= pos_target and neg_count >= NEG_EBITDA_SALES_CAP:
                 break
-            if checked >= MAX_CHECKED_PER_INDUSTRY and pos_count >= 10:
+            if checked >= MAX_CHECKED_PER_INDUSTRY and pos_count >= 14:
                 break
             checked += 1
             try:
@@ -600,13 +555,17 @@ def run_discovery(only_industry: str | None = None, write_outputs: bool = True) 
                     spy_trading_dates_loader=_load_spy_dates,
                 )
             except Exception as exc:
-                rec = {"ticker": ticker, "verified": False, "drop_reason": f"error:{exc}"}
+                rec = {"ticker": ticker, "verified": False, "v3_verified": False, "drop_reason": f"error:{exc}"}
                 new_snaps = []
 
             if rec["verified"]:
+                if ticker in prior_verified:
+                    for k in ("sub_industry", "customer_type", "classification_source"):
+                        if prior_verified[ticker].get(k) is not None:
+                            rec[k] = prior_verified[ticker][k]
                 if rec["ev_ebitda_eligible"]:
                     if pos_count >= pos_target:
-                        rec = {"ticker": ticker, "verified": False, "drop_reason": "industry_pos_cap_reached"}
+                        rec = {"ticker": ticker, "verified": False, "v3_verified": False, "drop_reason": "industry_pos_cap_reached"}
                     else:
                         pos_count += 1
                         all_new_snapshots.extend(new_snaps)
@@ -614,29 +573,36 @@ def run_discovery(only_industry: str | None = None, write_outputs: bool = True) 
                             existing_snapshots[(ticker, dt)] = (px, ref)
                 else:
                     if neg_count >= NEG_EBITDA_SALES_CAP:
-                        rec = {"ticker": ticker, "verified": False, "drop_reason": "neg_ebitda_sales_cap_reached"}
+                        rec = {"ticker": ticker, "verified": False, "v3_verified": False, "drop_reason": "neg_ebitda_sales_cap_reached"}
                     else:
                         neg_count += 1
                         all_new_snapshots.extend(new_snaps)
                         for _, dt, px, ref in new_snaps:
                             existing_snapshots[(ticker, dt)] = (px, ref)
+            elif preserve_legacy_verified and ticker in prior_verified and eff_method == "cover-gaap-v3":
+                # Keep historical cover-gaap-v2 catalog peers intact for rollback parity, annotated as v3_verified=False.
+                kept = dict(prior_verified[ticker])
+                kept["v3_verified"] = False
+                kept["v3_drop_reason"] = rec.get("drop_reason")
+                rec = kept
+                legacy_count += 1
 
             results.append(rec)
 
         report[ind] = results
-        sc = sum(1 for r in results if r.get("verified") and r.get("ev_ebitda_eligible") and r.get("ev_tier") == "small_cap")
-        mc = sum(1 for r in results if r.get("verified") and r.get("ev_ebitda_eligible") and r.get("ev_tier") == "mid_cap")
-        lc = sum(1 for r in results if r.get("verified") and r.get("ev_ebitda_eligible") and r.get("ev_tier") == "large_cap")
+        sc = sum(1 for r in results if r.get("verified") and r.get("v3_verified", True) and r.get("ev_ebitda_eligible") and r.get("ev_tier") == "small_cap")
+        mc = sum(1 for r in results if r.get("verified") and r.get("v3_verified", True) and r.get("ev_ebitda_eligible") and r.get("ev_tier") == "mid_cap")
+        lc = sum(1 for r in results if r.get("verified") and r.get("v3_verified", True) and r.get("ev_ebitda_eligible") and r.get("ev_tier") == "large_cap")
         print(
-            f"{ind:<26} checked={checked:>2} pos={pos_count:>2} (S={sc}/M={mc}/L={lc}) "
-            f"sales_only={neg_count:>2}",
+            f"{ind:<26} checked={checked:>3} v3_pos={pos_count:>2} (S={sc}/M={mc}/L={lc}) "
+            f"sales_only={neg_count:>2} v2_legacy_kept={legacy_count:>2}",
             flush=True,
         )
 
     if write_outputs:
         added_rows = _merge_snapshots_csv(csv_path, all_new_snapshots)
         veri_path.write_text(
-            json.dumps({"generated": datetime.now(UTC).isoformat(), "industries": report}, indent=2),
+            json.dumps({"generated": datetime.now(UTC).isoformat(), "method_version": eff_method, "industries": report}, indent=2),
             encoding="utf-8",
         )
         _write_universe_report(report_path, report)
@@ -650,9 +616,18 @@ def run_discovery(only_industry: str | None = None, write_outputs: bool = True) 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Discover and verify SEC/Yahoo peer universe")
     parser.add_argument("--industry", help="Optional single industry slug to process")
+    parser.add_argument("--method-version", default=DEFAULT_METHOD_VERSION, help="Methodology version (cover-gaap-v2 or cover-gaap-v3)")
+    parser.add_argument("--pos-target", type=int, default=None, help="Optional positive-EBITDA peer cap per industry")
+    parser.add_argument("--no-preserve-legacy", action="store_true", help="Do not retain v2-only legacy curated peers")
     parser.add_argument("--dry-run", action="store_true", help="Print findings without writing CSV/JSON")
     args = parser.parse_args()
-    run_discovery(only_industry=args.industry, write_outputs=not args.dry_run)
+    run_discovery(
+        only_industry=args.industry,
+        write_outputs=not args.dry_run,
+        method_version=args.method_version,
+        pos_target_override=args.pos_target,
+        preserve_legacy_verified=not args.no_preserve_legacy,
+    )
 
 
 if __name__ == "__main__":

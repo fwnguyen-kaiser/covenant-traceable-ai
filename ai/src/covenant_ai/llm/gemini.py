@@ -31,7 +31,14 @@ class GeminiClient:
     ) -> None:
         self.config = config or LLMConfig.from_env()
         self.interceptors = tuple(interceptors)
-        self._client = client or genai.Client(api_key=api_key)
+        if client is not None:
+            self._client = client
+        else:
+            timeout_ms = max(1000, int(round(self.config.timeout_s * 1000)))
+            self._client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(timeout=timeout_ms),
+            )
 
     def generate_structured(
         self,

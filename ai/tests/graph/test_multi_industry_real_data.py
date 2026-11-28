@@ -273,9 +273,9 @@ def test_e2e_curated_sub_industry_and_customer_type_rank_from_live_postgres():
     assert scores_by_t["FA"] == Decimal("1.000000")
     assert scores_by_t["EVTC"] == Decimal("0.500000")
     assert scores_by_t["ZS"] == Decimal("0.500000")
-    assert len(all_rows) == 9
+    assert len(all_rows) == 18
 
-    # Legacy v2 rollback preserves curated gov IT ranking (20 eligible peers via fallback if DB holds v3)
+    # Legacy v2 rollback preserves curated gov IT ranking (27 eligible peers via fallback if DB holds v3)
     provider_v2 = PostgresMarketDataProvider(method_version="cover-gaap-v2")
     app_v2 = create_valuation_graph(provider_v2, checkpointer=MemorySaver())
     config_v2 = {"configurable": {"thread_id": "case-gov-it-services-curated-v2"}}
@@ -297,4 +297,4 @@ def test_e2e_curated_sub_industry_and_customer_type_rank_from_live_postgres():
     assert scores_v2["CACI"] == Decimal("1.000000")
     assert scores_v2["CTSH"] == Decimal("0.500000")
     assert scores_v2["ZS"] == Decimal("0.000000")
-    assert len(rows_v2) == 20
+    assert len(rows_v2) == 27

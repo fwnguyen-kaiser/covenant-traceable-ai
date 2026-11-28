@@ -379,7 +379,8 @@ class CaseService:
                     SELECT id, owner_id, company_name, status, management_mode,
                            created_at, updated_at, archived_at
                     FROM cases
-                    WHERE id = %s;
+                    WHERE id = %s
+                    FOR SHARE;
                     """,
                     (str(case_id),),
                 ).fetchone()

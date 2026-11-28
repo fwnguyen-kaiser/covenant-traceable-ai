@@ -12,6 +12,7 @@ from covenant_ai.app.authz import ActorContext, AuthorizationService
 from covenant_ai.app.cases import CaseService
 from covenant_ai.app.errors import ConflictAppError, RunNotFoundError, ValidationAppError
 from covenant_ai.app.runs import ValuationRunnerService
+from covenant_ai.domain.intake import create_company_profile_from_intake
 from covenant_ai.providers.postgres_repo import PostgresCaseRepository
 
 
@@ -23,13 +24,28 @@ def _prompt_to_body(action: str, payload: dict[str, Any]) -> str:
         return prefix + ("Clarification needed:\n- " + "\n- ".join(qs) if qs else "Please provide missing intake details.")
     if action == "confirm_industry":
         proposed = payload.get("proposed") or ""
-        return f"Confirm industry classification (proposed: {proposed})."
+        lines = [f"Confirm industry classification (proposed: {proposed})."]
+        if payload.get("error"):
+            lines.append(str(payload["error"]))
+        summary = payload.get("ebitda_summary")
+        if summary:
+            for key, label in (("reported_ebitda", "Reported EBITDA"), ("total_adjustments", "Adjustments"),
+                               ("normalized_ebitda", "Normalized EBITDA")):
+                if summary.get(key) is not None:
+                    lines.append(f"{label} ({summary['ebitda_period']}, USD): {summary[key]}")
+        lines.extend(str(issue) for issue in payload.get("inconsistencies", []))
+        return "\n".join(lines)
     if action == "peer_review":
         peers = ", ".join(payload.get("selected_peers") or [])
         err = payload.get("error")
         prefix = f"Validation issue: {err}\n" if err else ""
         return f"{prefix}Review proposed comparable peers ({peers}). Approve or supply comma-separated tickers."
     return f"Action required: {action}"
+
+
+def _command_hash(prompt_id: str | None, answer: Any) -> str:
+    raw = json.dumps({"prompt_id": prompt_id, "answer": answer}, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _answer_to_display(answer: Any) -> str:
@@ -122,6 +138,13 @@ class AgentChatService:
         case_rec = self.cases.get_case(case_id)
         if intake_overrides is not None:
             answers = dict(intake_overrides)
+            try:
+                create_company_profile_from_intake(answers)
+            except ValueError as exc:
+                raise ValidationAppError(
+                    str(exc),
+                    field_errors={"intake_answers": str(exc)},
+                ) from exc
             profile_id = None
         elif case_rec.latest_profile is not None:
             answers = dict(case_rec.latest_profile.intake_answers or {})
@@ -213,6 +236,16 @@ class AgentChatService:
                 """,
                 (str(run_id),),
             ).fetchall()
+            receipts = conn.execute(
+                """
+                SELECT c.prompt_id, c.client_message_id, c.command_hash, m.payload->'answer'
+                FROM run_commands c JOIN chat_messages m
+                  ON m.run_id = c.run_id AND m.client_message_id = c.client_message_id
+                WHERE c.run_id = %s AND c.status = 'pending' AND m.sender_type = 'user'
+                ORDER BY m.seq_no
+                """,
+                (str(run_id),),
+            ).fetchall()
 
         thread_id = str(row[5])
         status = str(row[3])
@@ -228,6 +261,15 @@ class AgentChatService:
                         "payload": rec.pending_prompt.payload,
                         "waiting_nodes": list(rec.pending_prompt.waiting_nodes),
                     }
+                    for prompt, message, digest, answer in receipts:
+                        if prompt == rec.pending_prompt.prompt_id:
+                            # Before prompt IDs were required, some clients submitted
+                            # null here. Preserve the input used to identify that command.
+                            original = None if _command_hash(None, answer) == digest else prompt
+                            pending_dict["pending_reply"] = {
+                                "client_message_id": message, "prompt_id": original, "answer": answer,
+                            }
+                            break
                     # Ensure pending prompt is reflected in chat_messages if lost on pre-write crash
                     has_prompt_msg = any(m[4] == rec.pending_prompt.prompt_id for m in msg_rows)
                     if not has_prompt_msg:
@@ -303,14 +345,22 @@ class AgentChatService:
             raise RunNotFoundError("Run or checkpoint thread not found.")
         thread_id = str(row[0])
 
-        cmd_hash = hashlib.sha256(
-            json.dumps({"prompt_id": prompt_id, "answer": answer}, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
+        # Serialize the command receipt, checkpoint transition and response for
+        # this run. The runner uses its own lock for CLI/checkpoint access.
+        with psycopg.connect(self.db_url, connect_timeout=5) as guard:
+            guard.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"chat:{run_id}",))
+            return self._deliver_turn(actor, run_id, thread_id, clean_cmid, prompt_id, answer)
+
+    def _deliver_turn(
+        self, actor: ActorContext, run_id: UUID, thread_id: str, clean_cmid: str,
+        prompt_id: str | None, answer: Any,
+    ) -> dict[str, Any]:
+        cmd_hash = _command_hash(prompt_id, answer)
 
         with psycopg.connect(self.db_url, connect_timeout=5) as conn:
             cmd_row = conn.execute(
                 """
-                SELECT id, command_hash, status, response_payload
+                SELECT id, command_hash, status, prompt_id
                 FROM run_commands
                 WHERE run_id = %s AND client_message_id = %s;
                 """,
@@ -338,13 +388,20 @@ class AgentChatService:
 
         with psycopg.connect(self.db_url, connect_timeout=5) as conn:
             if cmd_row is None:
+                if not prompt_id:
+                    raise ValidationAppError("prompt_id is required to answer a specific pending question.")
                 if rec.terminal or rec.pending_prompt is None:
                     raise ConflictAppError("Run has no pending prompt waiting for input.")
                 if prompt_id and prompt_id != rec.pending_prompt.prompt_id:
                     raise ConflictAppError(
                         f"Stale or mismatched prompt_id {prompt_id!r}; expected {rec.pending_prompt.prompt_id!r}."
                     )
-                used_prompt_id = prompt_id or rec.pending_prompt.prompt_id
+                used_prompt_id = prompt_id
+                if conn.execute(
+                    "SELECT 1 FROM run_commands WHERE run_id=%s AND prompt_id=%s AND status='pending'",
+                    (str(run_id), used_prompt_id),
+                ).fetchone():
+                    raise ConflictAppError("An earlier reply is pending. Retry its original message ID.")
                 conn.execute(
                     """
                     INSERT INTO run_commands (
@@ -366,10 +423,12 @@ class AgentChatService:
                 )
                 conn.commit()
             else:
-                used_prompt_id = prompt_id or (rec.pending_prompt.prompt_id if rec.pending_prompt else None)
+                used_prompt_id = cmd_row[3]
                 if rec.terminal or (
                     rec.pending_prompt is not None and used_prompt_id and rec.pending_prompt.prompt_id != used_prompt_id
                 ):
+                    if cmd_row[2] == "failed":
+                        raise ConflictAppError("This reply failed and the run has since moved to another question.")
                     result = self.get_run_chat_state(actor, run_id)
                     conn.execute(
                         "UPDATE run_commands SET status = 'applied', response_payload = %s::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = %s;",
@@ -381,7 +440,9 @@ class AgentChatService:
 
         # Execute the single HITL turn cleanly through ValuationRunnerService
         try:
-            step = self.runner.submit_hitl_decision(thread_id, answer, actor_id=actor.user_id)
+            step = self.runner.submit_hitl_decision(
+                thread_id, answer, actor_id=actor.user_id, expected_prompt_id=used_prompt_id,
+            )
         except Exception as exc:
             with psycopg.connect(self.db_url, connect_timeout=5) as err_conn:
                 err_conn.execute(

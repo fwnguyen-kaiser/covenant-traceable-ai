@@ -345,11 +345,34 @@ class SwePlanEndToEndTests(SimpleTestCase):
 
         # Duplicate client_message_id with different payload -> 409; same payload -> idempotent replay
         cmid1 = f"turn-{uuid4().hex}"
-        t1 = self._post_json(
-            alice,
-            f"/api/runs/{run_id}/messages",
-            {"client_message_id": cmid1, "prompt_id": p1["prompt_id"], "answer": "industrial_machinery"},
+        missing_prompt = self._post_json(
+            alice, f"/api/runs/{run_id}/messages",
+            {"client_message_id": cmid1, "answer": "industrial_machinery"},
         )
+        self.assertEqual(missing_prompt.status_code, 400)
+        # Simulate a worker stopping after the user message was committed but
+        # before LangGraph received it. A refreshed browser reuses the receipt.
+        from covenant_ai.app.chat import _command_hash
+
+        reply = {"client_message_id": cmid1, "prompt_id": p1["prompt_id"], "answer": "industrial_machinery"}
+        with psycopg.connect(self.db_url) as conn:
+            conn.execute(
+                "INSERT INTO run_commands (run_id,thread_id,client_message_id,prompt_id,command_hash,status,actor_id) "
+                "VALUES (%s,%s,%s,%s,%s,'pending',%s)",
+                (run_id, tid1, cmid1, p1["prompt_id"], _command_hash(p1["prompt_id"], reply["answer"]), str(self.alice_id)),
+            )
+            conn.execute(
+                "INSERT INTO chat_messages (run_id,seq_no,sender_type,sender_id,message_type,prompt_id,client_message_id,body,payload) "
+                "SELECT %s,COALESCE(MAX(seq_no),0)+1,'user',%s,'answer',%s,%s,%s,%s::jsonb FROM chat_messages WHERE run_id=%s",
+                (run_id, str(self.alice_id), p1["prompt_id"], cmid1, reply["answer"], json.dumps({"answer": reply["answer"]}), run_id),
+            )
+        resume = alice.get(f"/api/runs/{run_id}/messages").json()["pending_action"]["pending_reply"]
+        self.assertEqual(resume, reply)
+        competing = self._post_json(alice, f"/api/runs/{run_id}/messages", {
+            **reply, "client_message_id": str(uuid4()), "answer": "application_software",
+        })
+        self.assertEqual(competing.status_code, 409)
+        t1 = self._post_json(alice, f"/api/runs/{run_id}/messages", resume)
         self.assertEqual(t1.status_code, 200)
         self.assertFalse(t1.json()["idempotent_replay"])
 
@@ -487,6 +510,14 @@ class SwePlanEndToEndTests(SimpleTestCase):
             },
         )
         self.assertEqual(v2.status_code, 201)
+        bad_override = self._post_json(
+            alice,
+            f"/api/cases/{cid}/runs",
+            {"intake_answers": {"company_name": "=1+1 Formula Safe Corp", "ebitda": "5200000"}},
+        )
+        self.assertEqual(bad_override.status_code, 400)
+        self.assertIn("intake_answers", bad_override.json().get("field_errors", {}))
+        runs_before_r2 = len(alice.get(f"/api/cases/{cid}/runs").json()["runs"])
         r2 = self._post_json(
             alice,
             f"/api/cases/{cid}/runs",
@@ -536,3 +567,4 @@ class SwePlanEndToEndTests(SimpleTestCase):
             alice.get(f"/api/runs/{run_id}/report").json()["valuation"]["ev_mid"],
             pkt_draft["valuation"]["ev_mid"],
         )
+        self.assertEqual(len(alice.get(f"/api/cases/{cid}/runs").json()["runs"]), runs_before_r2 + 1)
