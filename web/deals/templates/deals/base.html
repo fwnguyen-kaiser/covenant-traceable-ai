@@ -4,30 +4,42 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232563eb'/%3E%3Ctext x='16' y='21' font-family='system-ui,sans-serif' font-size='14' font-weight='700' fill='%23ffffff' text-anchor='middle'%3EPC%3C/text%3E%3C/svg%3E">
+  <script>try{var s=localStorage.getItem("covenant-color-scheme");var m=s==="light"?"light":"dark";document.querySelector('meta[name="color-scheme"]').content=m;document.documentElement.setAttribute("data-studio-theme",m);}catch(e){}</script>
   <title>{% block title %}Project Covenant{% endblock %}</title>
   <link rel="stylesheet" href="{% static 'deals/app.css' %}">
 </head>
-<body>
+<body {% block body_attrs %}{% endblock %}>
   <header class="topbar">
-    <div>
-      <strong>Project Covenant</strong>
+    <div class="topbar-brand-group">
+      <a class="brand-mark" href="/">
+        <span class="brand-glyph" aria-hidden="true">PC</span>
+        <span>
+          <span class="brand-title" style="display:block;">Project Covenant</span>
+          <span class="brand-subtitle" style="display:block;">Institutional EV/EBITDA Studio &middot; cover-gaap-v3</span>
+        </span>
+      </a>
       {% if actor %}
-        <a href="/">Cases</a>
-        <a href="/reviews/">Review &amp; Release Queue</a>
+      <nav class="topbar-nav" aria-label="Workspace navigation">
+        <a href="/" {% if nav_active == "cases" %}aria-current="page"{% endif %}>Deal Cases</a>
+        <a href="/reviews/" {% if nav_active == "reviews" %}aria-current="page"{% endif %}>Review &amp; Release Queue</a>
         {% if actor.role == "admin" %}
-          <a href="/admin-console/">Admin Console</a>
+          <a href="/admin-console/" {% if nav_active == "admin" %}aria-current="page"{% endif %}>Admin Console</a>
         {% endif %}
+      </nav>
       {% endif %}
     </div>
-    <div>
+    <div class="topbar-actions">
+      <button id="theme-toggle-btn" type="button" class="theme-toggle-btn" aria-pressed="false">Light Mode</button>
       {% if actor %}
-        <span class="badge">{{ actor.email }} ({{ actor.role }})</span>
+        <span class="badge mono">{{ actor.email }} ({{ actor.role }})</span>
         {% if actor.can_release_report %}
           <span class="badge badge-ok">report.release</span>
         {% endif %}
-        <form action="/logout/" method="post" style="display:inline;margin-left:10px;">
+        <form action="/logout/" method="post" style="margin:0;">
           {% csrf_token %}
-          <button type="submit" class="btn-secondary">Log Out</button>
+          <button type="submit" class="btn-secondary btn-sm">Log Out</button>
         </form>
       {% endif %}
     </div>
@@ -35,7 +47,7 @@
   <main class="container">
     {% block content %}{% endblock %}
   </main>
-  <script src="{% static 'deals/app.js' %}"></script>
+  <script type="module" src="{% static 'deals/app.js' %}"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

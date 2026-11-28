@@ -1,99 +1,117 @@
 {% extends "deals/base.html" %}
 {% block title %}Admin Console · Project Covenant{% endblock %}
+{% block body_attrs %}data-page="admin-console"{% endblock %}
 {% block content %}
-<div id="admin-error" class="error-box" style="display:none;"></div>
-<div class="row">
+<div id="admin-error" class="error-box" style="display:none;" role="alert"></div>
+<div class="row" style="margin-bottom:18px;">
   <div class="col">
     <div class="card">
-      <h3>Users &amp; Account Governance</h3>
+      <h1 id="users-table-heading" style="font-size:17px;margin-bottom:10px;">Users &amp; Account Governance</h1>
       <form id="admin-create-user" style="margin-bottom:14px;">
-        <label>Email</label><input id="adm_email" type="email" required>
-        <label>Initial Password (min 8 chars)</label><input id="adm_password" type="password" required>
-        <label>Role</label>
-        <select id="adm_role">
-          <option value="analyst">analyst</option>
-          <option value="reviewer">reviewer</option>
-          <option value="admin">admin</option>
-        </select>
+        <div class="form-grid-2">
+          <div>
+            <label for="adm_email">Email</label>
+            <input id="adm_email" type="email" autocomplete="off" required>
+          </div>
+          <div>
+            <label for="adm_role">Role</label>
+            <select id="adm_role">
+              <option value="analyst">analyst</option>
+              <option value="reviewer">reviewer</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
+        </div>
+        <label for="adm_password">Initial Password (min 8 chars)</label>
+        <input id="adm_password" type="password" autocomplete="new-password" required>
         <button type="submit" style="margin-top:10px;">Provision User</button>
       </form>
-      <table>
-        <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>report.release</th><th>Actions</th></tr></thead>
-        <tbody>
-          {% for u in users %}
-          <tr>
-            <td>{{ u.email }}</td>
-            <td>{{ u.role }}</td>
-            <td>{% if u.is_active %}<span class="badge badge-ok">active</span>{% else %}<span class="badge badge-danger">locked</span>{% endif %}</td>
-            <td>{% if u.can_release_report %}<span class="badge badge-ok">granted</span>{% else %}none{% endif %}</td>
-            <td>
-              <button class="btn-secondary" onclick="CovenantApp.toggleUserActive('{{ u.user_id }}', {{ u.is_active|yesno:'false,true' }})">
-                {% if u.is_active %}Lock{% else %}Unlock{% endif %}
-              </button>
-              <button class="btn-warn" onclick="CovenantApp.toggleReleasePerm('{{ u.user_id }}', {{ u.can_release_report|yesno:'false,true' }})">
-                {% if u.can_release_report %}Revoke Release{% else %}Grant Release{% endif %}
-              </button>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+      <div tabindex="0" role="region" aria-labelledby="users-table-heading" class="table-wrapper thin-scroll">
+        <table>
+          <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>report.release</th><th>Actions</th></tr></thead>
+          <tbody>
+            {% for u in users %}
+            <tr>
+              <td class="mono" style="font-size:12px;">{{ u.email }}</td>
+              <td>{{ u.role }}</td>
+              <td>{% if u.is_active %}<span class="badge badge-ok">active</span>{% else %}<span class="badge badge-danger">locked</span>{% endif %}</td>
+              <td>{% if u.can_release_report %}<span class="badge badge-ok">granted</span>{% else %}<span style="color:var(--studio-subtle);">none</span>{% endif %}</td>
+              <td>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <button type="button" class="btn-secondary btn-sm" data-admin-toggle-active="true" data-user-id="{{ u.user_id }}" data-next-active="{{ u.is_active|yesno:'false,true' }}">
+                    {% if u.is_active %}Lock{% else %}Unlock{% endif %}
+                  </button>
+                  <button type="button" class="btn-warn btn-sm" data-admin-toggle-release="true" data-user-id="{{ u.user_id }}" data-next-release="{{ u.can_release_report|yesno:'false,true' }}">
+                    {% if u.can_release_report %}Revoke Release{% else %}Grant Release{% endif %}
+                  </button>
+                </div>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
+
   <div class="col">
     <div class="card">
-      <h3>Case Ownership &amp; Assignments</h3>
-      <p style="font-size:13px;color:#5a677d;">Administrative metadata only; reading deal financials requires explicit assignment.</p>
-      <table>
-        <thead><tr><th>Company</th><th>Owner</th><th>Members</th><th>Assign Member</th></tr></thead>
-        <tbody>
-          {% for c in admin_cases %}
-          <tr>
-            <td>{{ c.company_name }}<br><span class="badge">{{ c.status }}</span></td>
-            <td>{{ c.owner_email|default:"UNOWNED" }}</td>
-            <td>
-              {% for m in c.members %}
-                <div>{{ m.email }} ({{ m.role }})</div>
-              {% empty %}
-                <span style="color:#5a677d;">None</span>
-              {% endfor %}
-            </td>
-            <td>
-              <select id="assign-user-{{ c.case_id }}">
-                {% for u in users %}<option value="{{ u.user_id }}">{{ u.email }}</option>{% endfor %}
-              </select>
-              <select id="assign-role-{{ c.case_id }}" style="margin-top:4px;">
-                <option value="analyst">analyst</option>
-                <option value="reviewer">reviewer</option>
-                <option value="release_admin">release_admin</option>
-              </select>
-              <button style="margin-top:6px;" onclick="CovenantApp.assignMember('{{ c.case_id }}')">Assign</button>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+      <h2 id="ownership-table-heading" style="font-size:17px;margin-bottom:4px;">Case Ownership &amp; Assignments</h2>
+      <p class="muted-note">Administrative metadata only; reading deal financials requires explicit assignment.</p>
+      <div tabindex="0" role="region" aria-labelledby="ownership-table-heading" class="table-wrapper thin-scroll">
+        <table>
+          <thead><tr><th>Company</th><th>Owner</th><th>Members</th><th>Assign Member</th></tr></thead>
+          <tbody>
+            {% for c in admin_cases %}
+            <tr>
+              <td><strong>{{ c.company_name }}</strong><br><span class="badge">{{ c.status }}</span></td>
+              <td class="mono" style="font-size:12px;">{{ c.owner_email|default:"UNOWNED" }}</td>
+              <td style="font-size:12px;">
+                {% for m in c.members %}
+                  <div>{{ m.email }} ({{ m.role }})</div>
+                {% empty %}
+                  <span style="color:var(--studio-subtle);">None</span>
+                {% endfor %}
+              </td>
+              <td>
+                <label class="visually-hidden" for="assign-user-{{ c.case_id }}">Select user</label>
+                <select id="assign-user-{{ c.case_id }}">
+                  {% for u in users %}<option value="{{ u.user_id }}">{{ u.email }}</option>{% endfor %}
+                </select>
+                <label class="visually-hidden" for="assign-role-{{ c.case_id }}">Select role</label>
+                <select id="assign-role-{{ c.case_id }}" style="margin-top:4px;">
+                  <option value="analyst">analyst</option>
+                  <option value="reviewer">reviewer</option>
+                  <option value="release_admin">release_admin</option>
+                </select>
+                <button type="button" class="btn-sm" style="margin-top:6px;" data-admin-assign-case="{{ c.case_id }}">Assign</button>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 </div>
+
 <div class="card">
-  <h3>Recent Audit Events</h3>
-  <table>
-    <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Detail</th></tr></thead>
-    <tbody>
-      {% for log in audit_logs %}
-      <tr>
-        <td>{{ log.created_at }}</td>
-        <td>{{ log.actor_email|default:"system" }}</td>
-        <td><code>{{ log.action }}</code></td>
-        <td>{{ log.entity_type }} {{ log.entity_id|default:"" }}</td>
-        <td><code>{{ log.detail }}</code></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <h2 id="audit-events-heading" style="font-size:16px;margin-bottom:10px;">Recent Audit Events</h2>
+  <div tabindex="0" role="region" aria-labelledby="audit-events-heading" class="table-wrapper thin-scroll">
+    <table>
+      <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Detail</th></tr></thead>
+      <tbody>
+        {% for log in audit_logs %}
+        <tr>
+          <td class="mono" style="font-size:12px;">{{ log.created_at }}</td>
+          <td class="mono" style="font-size:12px;">{{ log.actor_email|default:"system" }}</td>
+          <td><code class="mono">{{ log.action }}</code></td>
+          <td class="mono" style="font-size:12px;">{{ log.entity_type }} {{ log.entity_id|default:"" }}</td>
+          <td><code class="mono" style="font-size:11.5px;">{{ log.detail }}</code></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
-{% endblock %}
-{% block scripts %}
-<script>CovenantApp.initAdminConsole();</script>
 {% endblock %}

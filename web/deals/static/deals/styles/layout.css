@@ -1,0 +1,203 @@
+/* Institutional Shell, Topbar Navigation, and 3-Zone Deal Studio Grid */
+
+.topbar {
+  background: var(--studio-surface);
+  border-bottom: 1px solid var(--studio-border);
+  padding: 10px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.topbar-brand-group {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--studio-text);
+}
+
+.brand-glyph {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background: var(--studio-accent-solid);
+  color: var(--studio-accent-fg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+
+.brand-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.brand-subtitle {
+  font-size: 11px;
+  color: var(--studio-subtle);
+}
+
+.topbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.topbar-nav a {
+  text-decoration: none;
+  color: var(--studio-muted);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.topbar-nav a:hover {
+  color: var(--studio-text);
+  background: var(--studio-elevated);
+}
+
+.topbar-nav a[aria-current="page"] {
+  background: var(--studio-accent-soft);
+  color: var(--studio-accent);
+  border-color: var(--studio-accent);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.container {
+  max-width: 1580px;
+  margin: 0 auto;
+  padding: 20px 24px 36px;
+}
+
+.row {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.col {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+/* 3-Zone Deal Studio Workspace */
+.studio-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 340px) minmax(380px, 1fr) minmax(440px, 1.15fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.studio-rail,
+.studio-chat-col,
+.studio-report-col {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+@media (max-width: 1280px) {
+  .studio-grid {
+    grid-template-columns: minmax(290px, 340px) 1fr;
+  }
+  .studio-report-col {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 860px) {
+  .container {
+    padding: 14px;
+  }
+  .studio-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Responsive Semantic Table Container */
+.table-wrapper {
+  overflow: auto;
+  max-inline-size: 100%;
+  max-block-size: min(560px, 75vh);
+  container-type: inline-size;
+  border: 1px solid var(--studio-border);
+  border-radius: var(--radius-sm);
+}
+
+.table-wrapper:focus-visible {
+  outline: 2px solid var(--studio-accent);
+  outline-offset: 2px;
+}
+
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+
+thead th {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 2;
+  background: var(--studio-elevated);
+  color: var(--studio-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: left;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--studio-border);
+}
+
+tbody td,
+tbody th {
+  text-align: left;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--studio-border);
+  vertical-align: top;
+}
+
+tbody tr:last-child td,
+tbody tr:last-child th {
+  border-bottom: none;
+}
+
+tbody tr:hover td,
+tbody tr:hover th {
+  background: rgba(148, 163, 184, 0.04);
+}

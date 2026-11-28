@@ -80,12 +80,17 @@ def case_list_view(request: HttpRequest) -> HttpResponse:
         status_filter = ""
     cases = svc.list_cases(actor, search=q or None, status_filter=status_filter or None)
     industries = [(ind.value, ind.value.replace("_", " ").title()) for ind in Industry]
+    active_count = sum(1 for c in cases if c.status == "active")
+    archived_count = sum(1 for c in cases if c.status == "archived")
     return render(
         request,
         "deals/case_list.html",
         {
             "actor": actor,
             "cases": cases,
+            "active_count": active_count,
+            "archived_count": archived_count,
+            "nav_active": "cases",
             "q": q,
             "status_filter": request.GET.get("status") or "active",
             "industries": industries,
@@ -116,6 +121,7 @@ def case_detail_view(request: HttpRequest, case_id: UUID) -> HttpResponse:
         "deals/case_detail.html",
         {
             "actor": actor,
+            "nav_active": "cases",
             "case": case_rec,
             "profiles": profiles,
             "latest_profile": case_rec.latest_profile,
@@ -142,6 +148,7 @@ def review_queue_view(request: HttpRequest) -> HttpResponse:
         "deals/review_queue.html",
         {
             "actor": actor,
+            "nav_active": "reviews",
             "review_items": review_items,
             "release_items": release_items,
         },
@@ -167,6 +174,7 @@ def admin_console_view(request: HttpRequest) -> HttpResponse:
         "deals/admin_console.html",
         {
             "actor": actor,
+            "nav_active": "admin",
             "users": users,
             "admin_cases": cases,
             "audit_logs": logs,
