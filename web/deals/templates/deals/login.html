@@ -1,0 +1,27 @@
+{% extends "deals/base.html" %}
+{% block title %}Sign In · Project Covenant{% endblock %}
+{% block body_attrs %}data-page="login"{% endblock %}
+{% block content %}
+<div class="card auth-shell">
+  <div class="card-header" style="margin-bottom:8px;">
+    <div>
+      <div class="badge badge-accent" style="margin-bottom:6px;">Local RBAC Workstation</div>
+      <h1 style="font-size:20px;margin:0;">Sign In to Workspace</h1>
+    </div>
+  </div>
+  <p class="muted-note">Authenticated local session required to access deal cases, SEC peer ledgers, and frozen valuation packets.</p>
+  {% if error %}
+    <div class="error-box" role="alert">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="/login/">
+    {% csrf_token %}
+    <label for="id_email">Email</label>
+    <input id="id_email" type="email" name="email" autocomplete="email" autocorrect="off" autocapitalize="none" spellcheck="false" required autofocus>
+    <label for="id_password">Password</label>
+    <input id="id_password" type="password" name="password" autocomplete="current-password" required>
+    <div style="margin-top:16px;">
+      <button type="submit" style="width:100%;">Sign In</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

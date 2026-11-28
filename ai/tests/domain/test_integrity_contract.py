@@ -68,7 +68,7 @@ def test_wrong_quoted_amount_never_posts_and_explicit_empty_list_withdraws_prior
                     business_description="Manufacturing", revenue_usd="1000", reported_ebitda_usd="100",
                     ebitda_period="FY", adjustments=[dict(category="non_recurring_charges", description="Fees",
                     amount_usd="50", confidence=1, evidence_quote="fees of $5")])
-    raw = "US manufacturer, FY revenue $1,000, EBITDA $100, fees of $5."
+    raw = "Demo is a US manufacturer, FY revenue $1,000, EBITDA $100, fees of $5."
     result = extract_intake_from_text(FakeLLMClient({"intake_extract": response}), raw)
     assert result.clarify_needed and result.merged_answers["adjustment_items"] == []
     cleared = extract_intake_from_text(FakeLLMClient({"intake_extract": {**response, "adjustments": []}}),

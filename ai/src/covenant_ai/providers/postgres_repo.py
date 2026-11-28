@@ -17,6 +17,7 @@ from uuid import UUID, uuid5
 import psycopg
 
 from covenant_ai.domain.bridge import build_peer_financials
+from covenant_ai.domain.evidence import DEFAULT_METHOD_VERSION
 from covenant_ai.domain.models import CompanyProfile, FinancialDatapoint
 from covenant_ai.domain.screening import PeerScreeningScore
 from covenant_ai.providers.reviewer import authorized_windows_reviewer
@@ -46,6 +47,12 @@ def _profile_digest(profile: CompanyProfile, answers: dict | None) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def packet_sha256_digest(packet: dict[str, Any]) -> str:
+    """Compute canonical SHA-256 fingerprint for a stored analysis_runs.review_packet."""
+    encoded = json.dumps(packet, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def make_review_packet(run_id: UUID, state: dict) -> dict:
     keys = ("valuation", "company_profile", "selected_peers", "peer_screening_results", "failed_peers",
             "audit_verdict", "audit_findings", "audit_fallback_used", "explain_mode", "prompt_version",
@@ -65,7 +72,8 @@ def make_review_packet(run_id: UUID, state: dict) -> dict:
                            "inputs": ["company_profile.total_debt", "company_profile.cash"]},
         },
         **{key: state.get(key) for key in keys},
-        "method_version": "cover-gaap-v2",
+        **{key: state[key] for key in ("screening_failures", "failed_peer_details") if state.get(key)},
+        "method_version": str(state.get("method_version") or DEFAULT_METHOD_VERSION),
         "release_status": "draft",
         "sources": [
             {**dp.model_dump(mode="json"), "snapshot_id": str(uuid5(run_id, str(dp.id)))}
@@ -93,8 +101,18 @@ class PostgresCaseRepository:
                 raise ValueError("Another session is already operating on this thread.")
             yield
 
-    def sync_profile(self, thread_id: str, profile: CompanyProfile, answers: dict | None) -> tuple:
+    def sync_profile(
+        self,
+        thread_id: str,
+        profile: CompanyProfile,
+        answers: dict | None,
+        *,
+        case_id: UUID | None = None,
+        profile_id: UUID | None = None,
+        actor_id: UUID | None = None,
+    ) -> tuple[UUID, UUID]:
         """Reconcile against the committed profile version in one transaction."""
+        target_digest = _profile_digest(profile, answers)
         with psycopg.connect(self.db_url, connect_timeout=5) as conn:
             row = conn.execute(
                 "SELECT r.id, r.case_id, r.status, p.extra->>'profile_digest' "
@@ -102,14 +120,49 @@ class PostgresCaseRepository:
                 "WHERE r.thread_id=%s FOR UPDATE OF r", (thread_id,)
             ).fetchone()
             if row is None:
-                case_id, profile_id = self.create_case_and_profile(profile, answers, connection=conn)
-                run_id = self.start_analysis_run(case_id, profile_id, thread_id, connection=conn)
-                return case_id, run_id
-            run_id, case_id, status, digest = row
-            if status == "running" and digest != _profile_digest(profile, answers):
-                _, profile_id = self.create_case_and_profile(profile, answers, case_id=case_id, connection=conn)
-                conn.execute("UPDATE analysis_runs SET profile_id=%s WHERE id=%s", (profile_id, run_id))
-            return case_id, run_id
+                if case_id is not None and profile_id is not None:
+                    existing_prof = conn.execute(
+                        "SELECT id, extra->>'profile_digest' FROM company_profiles WHERE id=%s AND case_id=%s",
+                        (str(profile_id), str(case_id)),
+                    ).fetchone()
+                    if existing_prof is not None and existing_prof[1] == target_digest:
+                        resolved_case_id = _coerce_uuid(case_id)
+                        resolved_profile_id = _coerce_uuid(profile_id)
+                    else:
+                        resolved_case_id, resolved_profile_id = self.create_case_and_profile(
+                            profile,
+                            answers,
+                            case_id=case_id,
+                            actor_id=actor_id,
+                            connection=conn,
+                        )
+                else:
+                    resolved_case_id, resolved_profile_id = self.create_case_and_profile(
+                        profile,
+                        answers,
+                        case_id=case_id,
+                        actor_id=actor_id,
+                        connection=conn,
+                    )
+                run_id = self.start_analysis_run(
+                    resolved_case_id,
+                    resolved_profile_id,
+                    thread_id,
+                    actor_id=actor_id,
+                    connection=conn,
+                )
+                return resolved_case_id, run_id
+            run_id, existing_case_id, status, digest = row
+            if status == "running" and digest != target_digest:
+                _, new_profile_id = self.create_case_and_profile(
+                    profile,
+                    answers,
+                    case_id=_coerce_uuid(existing_case_id),
+                    actor_id=actor_id,
+                    connection=conn,
+                )
+                conn.execute("UPDATE analysis_runs SET profile_id=%s WHERE id=%s", (str(new_profile_id), run_id))
+            return _coerce_uuid(existing_case_id), _coerce_uuid(run_id)
 
     def create_case_and_profile(
         self,
@@ -118,6 +171,7 @@ class PostgresCaseRepository:
         *,
         case_id: UUID | None = None,
         actor_id: UUID | None = None,
+        expected_version: int | None = None,
         connection: psycopg.Connection | None = None,
     ) -> tuple[UUID, UUID]:
         """Insert/update a case row and append a new versioned company_profiles row."""
@@ -182,15 +236,31 @@ class PostgresCaseRepository:
                     next_version = 1
                 else:
                     resolved_case_id = case_id
+                    locked_case = cur.execute(
+                        "SELECT id FROM cases WHERE id = %s FOR UPDATE;",
+                        (str(resolved_case_id),),
+                    ).fetchone()
+                    if locked_case is None:
+                        from covenant_ai.app.errors import CaseNotFoundError
+
+                        raise CaseNotFoundError(f"Case {resolved_case_id} does not exist.")
+                    cur.execute(
+                        "SELECT COALESCE(MAX(version), 0) FROM company_profiles WHERE case_id = %s;",
+                        (str(resolved_case_id),),
+                    )
+                    current_max = int(cur.fetchone()[0])
+                    if expected_version is not None and current_max != expected_version:
+                        from covenant_ai.app.errors import VersionConflictError
+
+                        raise VersionConflictError(
+                            f"Profile base version mismatch: expected {expected_version}, latest is {current_max}.",
+                            latest_version=current_max,
+                        )
                     cur.execute(
                         "UPDATE cases SET company_name = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s;",
                         (profile.company_name, str(resolved_case_id)),
                     )
-                    cur.execute(
-                        "SELECT COALESCE(MAX(version), 0) + 1 FROM company_profiles WHERE case_id = %s;",
-                        (str(resolved_case_id),),
-                    )
-                    next_version = int(cur.fetchone()[0])
+                    next_version = current_max + 1
 
                 cur.execute(
                     """
@@ -242,6 +312,18 @@ class PostgresCaseRepository:
         """Create a new analysis_runs record bound to a LangGraph thread_id."""
         with (nullcontext(connection) if connection is not None else psycopg.connect(self.db_url, connect_timeout=5)) as conn:
             with conn.cursor() as cur:
+                case_row = cur.execute(
+                    "SELECT status FROM cases WHERE id = %s FOR UPDATE;",
+                    (str(case_id),),
+                ).fetchone()
+                if case_row is None:
+                    from covenant_ai.app.errors import CaseNotFoundError
+
+                    raise CaseNotFoundError(f"Case {case_id} no longer exists.")
+                if str(case_row[0]) == "archived":
+                    from covenant_ai.app.errors import ConflictAppError
+
+                    raise ConflictAppError("Cannot start an analysis run on an archived case.")
                 cur.execute(
                     """
                     INSERT INTO analysis_runs (case_id, profile_id, status, ai_run_id, thread_id)
@@ -310,8 +392,7 @@ class PostgresCaseRepository:
             if not row or not row[2]:
                 raise ValueError("No versioned report is available for this thread.")
             run_id, case_id, packet = row
-            encoded = json.dumps(packet, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            fingerprint = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            fingerprint = packet_sha256_digest(packet)
             if digest is not None:
                 reviewer = authorized_windows_reviewer()
                 if fingerprint != digest or packet.get("audit_verdict") not in {"warn", "pass"}:

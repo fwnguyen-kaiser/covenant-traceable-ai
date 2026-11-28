@@ -1,0 +1,5 @@
+# Django Web delivery layer & frozen XLSX export dependencies (install alongside editable ai/)
+django>=5.2,<6.0
+openpyxl>=3.1
+# Optional for P7 browser E2E automation:
+# playwright>=1.48

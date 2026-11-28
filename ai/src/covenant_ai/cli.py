@@ -17,17 +17,19 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from langgraph.types import Command, Overwrite
-from psycopg.conninfo import conninfo_to_dict
-
+from covenant_ai.app.errors import (
+    DuplicateThreadError,
+    LocalPolicyError,
+    RunNotFoundError,
+    ValidationAppError,
+)
+from covenant_ai.app.exports import export_packet_files, format_packet_banner
+from covenant_ai.app.reviews import ReviewService
+from covenant_ai.app.runs import ValuationRunnerService, ensure_local_db_url
+from covenant_ai.domain.amounts import parse_amount
 from covenant_ai.domain.intake_questions import Stage, questions
-from covenant_ai.domain.models import ExplainMode, FinancialDatapoint, SourceType
-from datetime import UTC, datetime
-from covenant_ai.graph.checkpointer import open_postgres_checkpointer
-from covenant_ai.graph.workflow import create_valuation_graph
-from covenant_ai.llm.client import LLMClient, build_default_llm_client
-from covenant_ai.providers.db_schema import normalize_db_url
-from covenant_ai.providers.postgres import PostgresMarketDataProvider
+from covenant_ai.domain.models import ExplainMode
+from covenant_ai.llm.client import LLMClient
 from covenant_ai.providers.postgres_repo import PostgresCaseRepository
 
 
@@ -180,15 +182,23 @@ def _prompt_hitl_decision(payload: dict[str, Any], auto_approve: bool) -> Any:
 
 
 def _export_packet(packet: dict, markdown: Path | None, json_path: Path | None) -> None:
-    status = packet["release_status"].upper()
-    banner = f"**{status}** · {packet['method_version']} · SHA-256 `{packet['digest']}`"
-    report = f"{banner}\n\n{packet['explanation']}"
-    if markdown:
-        markdown.write_text(report, encoding="utf-8")
-    if json_path:
-        json_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Thread {packet['thread_id']} · {status}")
+    report = export_packet_files(packet, markdown_path=markdown, json_path=json_path)
+    print(f"Thread {packet['thread_id']} · {str(packet['release_status']).upper()}")
     print(report)
+
+
+def _prompt_legacy_field(field: str) -> Decimal | None:
+    while True:
+        raw = input(f"Confirm target {field} in USD (0 if zero, Enter if unknown): ").strip()
+        if not raw:
+            return None
+        try:
+            amount = Decimal(raw)
+            if not amount.is_finite() or amount < 0:
+                raise ValueError
+            return amount
+        except (ArithmeticError, ValueError):
+            print("Enter a nonnegative USD amount.")
 
 
 def run_cli(
@@ -223,131 +233,79 @@ def run_cli(
         parser.error("A resume cannot also start a new case.")
     if args.input and args.prompt:
         parser.error("Choose one intake source.")
-    db_url = normalize_db_url(args.db_url)
-    connection = conninfo_to_dict(db_url)
-    addresses = [connection.get("host"), connection.get("hostaddr")]
-    if connection.get("service") or not any(addresses) or any(
-        addr and addr.lower() not in {"localhost", "127.0.0.1", "::1"} for addr in addresses
-    ):
-        parser.error("Private case data requires a PostgreSQL server on this machine.")
+    try:
+        db_url = ensure_local_db_url(args.db_url)
+    except LocalPolicyError as exc:
+        parser.error(str(exc))
+
     repo = PostgresCaseRepository(db_url=db_url)
     if args.review_report:
-        packet = repo.review_report(args.review_report, args.approve_digest)
+        reviews = ReviewService(repo)
+        packet = (
+            reviews.approve_legacy_windows_sid(args.review_report, args.approve_digest)
+            if args.approve_digest
+            else reviews.get_frozen_packet(args.review_report)
+        )
         _export_packet(packet, args.export_md, args.export_json)
         return 0
-    provider = PostgresMarketDataProvider(db_url=db_url, allow_on_demand_yahoo=True)
-    active_llm = llm_client if llm_client is not None else build_default_llm_client()
-    default_mode = args.explain_mode or (
-        ExplainMode.LLM_HYBRID.value if active_llm is not None else ExplainMode.DETERMINISTIC.value
-    )
 
+    runner = ValuationRunnerService(db_url=db_url, repo=repo, llm_client=llm_client)
     thread_id = args.resume or args.thread_id or f"run-{uuid4().hex}"
-    config = {"configurable": {"thread_id": thread_id}}
-    run_id = case_id = None
-    with repo.thread_lock(thread_id), open_postgres_checkpointer(db_url) as checkpointer:
-        app = create_valuation_graph(provider, checkpointer=checkpointer,
-                                     llm_client=active_llm, default_explain_mode=default_mode)
-        snap = app.get_state(config)
-        run_row = repo.get_run_by_thread_id(thread_id)
+
+    try:
         if args.resume:
-            if not snap.created_at:
-                print(f"No checkpoint found for thread_id={thread_id!r}", file=sys.stderr)
-                return 1
-            if run_row:
-                run_id, case_id, status = run_row
-            terminal = bool(run_row and status != "running")
-            state = dict(snap.values)
-            if terminal and snap.next:
-                raise ValueError("Historical run and checkpoint disagree on completion. Manual review required.")
-            if not terminal and state.get("company_profile") and not state.get("integrity_version"):
-                profile = state["company_profile"]
-                answers = dict(state.get("intake_answers") or {})
-                updates = {}
-                for field in ("total_debt", "cash"):
-                    if getattr(profile, field) == 0 and answers.get(field) in (None, ""):
-                        if args.auto_approve:
-                            print(f"Legacy {field} needs confirmation. Resume interactively; Enter keeps EV only.")
-                            return 0
-                        while True:
-                            raw = input(f"Confirm target {field} in USD (0 if zero, Enter if unknown): ").strip()
-                            try:
-                                amount = Decimal(raw) if raw else None
-                                if amount is not None and (not amount.is_finite() or amount < 0):
-                                    raise ValueError
-                                break
-                            except ArithmeticError:
-                                print("Enter a nonnegative USD amount.")
-                            except ValueError:
-                                print("Enter a nonnegative USD amount.")
-                        updates[field] = amount
-                        answers[field] = str(amount) if amount is not None else None
-                profile = profile.model_copy(update=updates)
-                # Old ranking may depend on an invented zero. Re-run screening and peer review.
-                target_points = [d for d in state.get("ledger", [])
-                                 if not d.peer_ticker and d.metric not in {"cash", "total_debt", "revenue"}]
-                for metric in ("cash", "total_debt", "revenue"):
-                    amount = getattr(profile, metric)
-                    if amount is not None:
-                        target_points.append(FinancialDatapoint(
-                            metric=metric, value=amount, period=profile.ebitda_period, period_end=profile.period_end_date,
-                            source_type=SourceType.USER_PROVIDED, source_ref=f"Target intake field {metric}",
-                            retrieved_at=datetime.now(UTC),
-                        ))
-                change = {"company_profile": profile, "intake_answers": answers, "integrity_version": 2,
-                          "ledger": Overwrite(target_points),
-                          "failed_peers": {}, "disqualified_peers": [], "valuation": {}, "retry_count": 0,
-                          "peer_review_confirmed": False, "insufficient_peers": False}
-                app.update_state(config, change, as_node="confirm_industry" if state.get("industry_confirmed") else "intake")
-                snap = app.get_state(config)
-                state = dict(snap.values)
-            if not terminal:
-                pending = [i for task in snap.tasks for i in task.interrupts]
-                if pending:
-                    state["__interrupt__"] = pending
-                elif snap.next:
-                    state = app.invoke(None, config=config)
+            legacy_cb = None if args.auto_approve else _prompt_legacy_field
+            step = runner.inspect_or_recover_run(
+                thread_id,
+                explain_mode=args.explain_mode,
+                legacy_confirm_fn=legacy_cb,
+            )
+            if step is None:
+                print("Legacy target fields need confirmation. Resume interactively; Enter keeps EV only.")
+                return 0
         else:
-            if snap.created_at or run_row:
-                print("This thread is already in use. Resume it or start a new thread.", file=sys.stderr)
-                return 1
-            if args.prompt and active_llm is None:
-                print("Free-text intake needs a local extraction client. Use local JSON or interactive intake.", file=sys.stderr)
-                return 1
             if args.prompt:
-                init_state = {"raw_input": args.prompt}
+                step = runner.start_run(
+                    raw_input=args.prompt,
+                    thread_id=thread_id,
+                    explain_mode=args.explain_mode,
+                )
             else:
-                answers = (json.loads(args.input.read_text(encoding="utf-8"), parse_float=Decimal)
-                           if args.input else collect_interactive_intake())
-                init_state = {"intake_answers": answers}
-            init_state.update(integrity_version=2, explain_mode=default_mode)
-            state = app.invoke(init_state, config=config)
-            terminal = False
+                answers = (
+                    json.loads(args.input.read_text(encoding="utf-8"), parse_float=Decimal)
+                    if args.input
+                    else collect_interactive_intake()
+                )
+                step = runner.start_run(
+                    intake_answers=answers,
+                    thread_id=thread_id,
+                    explain_mode=args.explain_mode,
+                )
+    except (DuplicateThreadError, RunNotFoundError, ValidationAppError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
-        while not terminal:
-            if state.get("company_profile") is not None:
-                case_id, run_id = repo.sync_profile(thread_id, state["company_profile"], state.get("intake_answers"))
-                repo.sync_decisions(run_id, state)
-            if "__interrupt__" not in state:
-                if app.get_state(config).next:
-                    raise RuntimeError("Cannot finalize while graph work remains.")
-                if run_id is None:
-                    raise RuntimeError("No persisted case for terminal checkpoint.")
-                repo.finish_analysis_run(run_id, state)
-                break
-            if not args.resume and args.pause_after_intake:
-                print(f"Paused after intake. Resume with: --resume {thread_id}")
-                return 0
-            payload = state["__interrupt__"][0].value
-            try:
-                decision = _prompt_hitl_decision(payload, args.auto_approve)
-            except PauseRequested:
-                print(f"Paused. Resume with: --resume {thread_id}")
-                return 0
-            state = app.invoke(Command(resume=decision), config=config)
+    while not step.terminal:
+        if not args.resume and args.pause_after_intake:
+            print(f"Paused after intake. Resume with: --resume {thread_id}")
+            return 0
+        assert step.pending_prompt is not None
+        try:
+            decision = _prompt_hitl_decision(step.pending_prompt.payload, args.auto_approve)
+        except PauseRequested:
+            print(f"Paused. Resume with: --resume {thread_id}")
+            return 0
+        step = runner.submit_hitl_decision(
+            thread_id,
+            decision,
+            explain_mode=args.explain_mode,
+        )
 
-    if run_id and state.get("valuation") and state.get("integrity_version") == 2:
-        _export_packet(repo.review_report(thread_id), args.export_md, args.export_json)
+    if step.packet is not None:
+        _export_packet(step.packet, args.export_md, args.export_json)
         return 0
+
+    state = step.state
     explanation = state.get("explanation") or "Workflow completed without explanation."
     if args.export_md:
         args.export_md.write_text(explanation, encoding="utf-8")
@@ -356,9 +314,9 @@ def run_cli(
         args.export_json.write_text(
             json.dumps(
                 {
-                    "thread_id": thread_id,
-                    "run_id": str(run_id) if run_id else None,
-                    "case_id": str(case_id) if case_id else None,
+                    "thread_id": step.thread_id,
+                    "run_id": str(step.run_id) if step.run_id else None,
+                    "case_id": str(step.case_id) if step.case_id else None,
                     "valuation": state.get("valuation"),
                     "peer_screening_results": state.get("peer_screening_results"),
                     "failed_peers": state.get("failed_peers"),

@@ -8,6 +8,7 @@ EdgarMarketDataProvider, and populates:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from datetime import date
@@ -18,11 +19,14 @@ from uuid import uuid4
 
 import psycopg
 
+from covenant_ai.domain.evidence import DEFAULT_METHOD_VERSION, MethodologyVersion, normalize_method_version
 from covenant_ai.providers.db_schema import ensure_domain_schema, normalize_db_url
 from covenant_ai.providers.edgar import EdgarMarketDataProvider
+from covenant_ai.providers.edgar_manifest import ProviderMode
 
 DEFAULT_DB_URL = "postgresql://covenant_user:covenant_secure_pass_2026@localhost:5432/covenant_ai"
 MIN_SEED_PEERS_PER_INDUSTRY = 8
+MIN_SEED_PEERS_PER_INDUSTRY_V3 = 5
 SKIPPED_INDUSTRIES: dict[str, str] = {}
 
 
@@ -33,9 +37,25 @@ def _to_decimal_or_none(raw: object) -> Decimal | None:
     return Decimal(s) if s else None
 
 
-def seed_database(db_url: str | None = None) -> None:
+def seed_database(
+    db_url: str | None = None,
+    *,
+    method_version: str | None = None,
+    min_peers_per_industry: int | None = None,
+    offline: bool = False,
+) -> None:
     conn_str = normalize_db_url(db_url)
     ensure_domain_schema(conn_str)
+    eff_method = normalize_method_version(method_version or DEFAULT_METHOD_VERSION).value
+    min_required = (
+        min_peers_per_industry
+        if min_peers_per_industry is not None
+        else (
+            MIN_SEED_PEERS_PER_INDUSTRY
+            if eff_method == MethodologyVersion.V2.value
+            else MIN_SEED_PEERS_PER_INDUSTRY_V3
+        )
+    )
 
     mod_dir = Path(__file__).resolve().parent.parent
     veri_path = mod_dir / "peer_verification.json"
@@ -43,7 +63,10 @@ def seed_database(db_url: str | None = None) -> None:
         raise FileNotFoundError(f"Verification file not found at {veri_path}")
 
     veri_data = json.loads(veri_path.read_text(encoding="utf-8"))["industries"]
-    provider = EdgarMarketDataProvider()
+    provider = EdgarMarketDataProvider(
+        method_version=eff_method,
+        mode=ProviderMode.OFFLINE if offline else ProviderMode.COLLECT,
+    )
 
     parsed_db_url = urlsplit(conn_str)
     db_location = f"{parsed_db_url.hostname}:{parsed_db_url.port or 5432}/{parsed_db_url.path.lstrip('/')}"
@@ -52,6 +75,8 @@ def seed_database(db_url: str | None = None) -> None:
         with conn.cursor() as cur:
             batch_id = uuid4()
             cur.execute("SELECT pg_advisory_xact_lock(hashtextextended('covenant_seed_baseline', 0))")
+            cur.execute("INSERT INTO peer_baseline_batches (id, method_version) VALUES (%s, %s)",
+                        (batch_id, provider.method_version.value))
             cur.execute("UPDATE peer_companies SET verified=FALSE")
             total_companies = 0
             total_fy_companies = 0
@@ -89,18 +114,20 @@ def seed_database(db_url: str | None = None) -> None:
                     latest_rev = _to_decimal_or_none(p.get("latest_revenue_usd"))
                     rationale = p.get("selection_rationale") or {}
 
+                    errors: dict[str, str] = {}
+                    fy_pts = []
+                    ltm_pts = []
                     try:
                         fy_pts = provider.get_peer_financials(ticker, period="FY")
                     except Exception as exc:
-                        print(f"  Warning: failed to extract FY datapoints for {ticker}: {exc}")
-                        continue
+                        errors["FY"] = str(exc)
+                        ev_ebitda_eligible = False
 
-                    errors = {}
-                    ltm_pts = []
-                    try:
-                        ltm_pts = provider.get_peer_financials(ticker, period="LTM")
-                    except Exception as exc:
-                        errors["LTM"] = str(exc)
+                    if fy_pts:
+                        try:
+                            ltm_pts = provider.get_peer_financials(ticker, period="LTM")
+                        except Exception as exc:
+                            errors["LTM"] = str(exc)
 
                     cur.execute(
                         """
@@ -183,34 +210,44 @@ def seed_database(db_url: str | None = None) -> None:
                         total_datapoints += 1
 
                     total_companies += 1
-                    total_fy_companies += 1
+                    if fy_pts:
+                        total_fy_companies += 1
                     ind_seeded += 1
-                    if ev_ebitda_eligible:
+                    if fy_pts and ev_ebitda_eligible:
                         ind_ebitda_eligible += 1
                     if ltm_pts:
                         total_ltm_companies += 1
                         ind_ltm += 1
 
                 print(
-                    f"  - {industry:<26}: {ind_seeded:>2} total "
-                    f"({ind_ebitda_eligible:>2} EV/EBITDA eligible, {ind_ltm:>2} LTM-ready)"
+                    f"  - {industry:<26}: {ind_seeded:>2} catalog "
+                    f"({ind_ebitda_eligible:>2} EV/EBITDA eligible [{eff_method}], {ind_ltm:>2} LTM-ready)"
                 )
-                if ind_ebitda_eligible < MIN_SEED_PEERS_PER_INDUSTRY:
+                if ind_ebitda_eligible < min_required:
                     raise RuntimeError(
                         f"Only {ind_ebitda_eligible} EV/EBITDA-eligible peers were seeded for {industry}; "
-                        f"at least {MIN_SEED_PEERS_PER_INDUSTRY} are required. "
+                        f"at least {min_required} are required for {eff_method}. "
                         "The seed transaction was rolled back."
                     )
 
             conn.commit()
 
             print("\n========================================================")
-            print("Seeding completed successfully!")
+            print(f"Seeding completed successfully! ({eff_method})")
             print(f"Total verified peer companies : {total_companies} (FY={total_fy_companies}, LTM={total_ltm_companies})")
             print(f"Total baseline datapoints     : {total_datapoints}")
             print("========================================================")
 
 
 if __name__ == "__main__":
-    url = sys.argv[1] if len(sys.argv) > 1 else None
-    seed_database(url)
+    parser = argparse.ArgumentParser(description="Seed SEC EDGAR peer baseline into PostgreSQL.")
+    parser.add_argument("positional_url", nargs="?", default=None, help="Optional database URL")
+    parser.add_argument("--db-url", default=None, help="Database URL override")
+    parser.add_argument("--method-version", default=None, help="Methodology version (cover-gaap-v2 or cover-gaap-v3)")
+    parser.add_argument("--offline", action="store_true", help="Restrict EDGAR provider to strict offline cache mode")
+    args = parser.parse_args()
+    seed_database(
+        args.db_url or args.positional_url,
+        method_version=args.method_version,
+        offline=args.offline,
+    )

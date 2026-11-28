@@ -8,6 +8,10 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(255) UNIQUE NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
     role VARCHAR(50) DEFAULT 'analyst',
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    can_release_report BOOLEAN NOT NULL DEFAULT FALSE,
+    credentials_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    django_user_id BIGINT UNIQUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -17,9 +21,23 @@ CREATE TABLE IF NOT EXISTS cases (
     owner_id UUID REFERENCES users(id) ON DELETE SET NULL,
     company_name VARCHAR(255) NOT NULL,
     status VARCHAR(50) DEFAULT 'active',
+    management_mode VARCHAR(20) NOT NULL DEFAULT 'legacy_cli' CHECK (management_mode IN ('legacy_cli', 'web_managed')),
+    archived_at TIMESTAMP WITH TIME ZONE,
+    archived_by UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS case_memberships (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    case_id UUID NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role VARCHAR(30) NOT NULL CHECK (role IN ('analyst', 'reviewer', 'release_admin')),
+    assigned_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (case_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_case_memberships_user ON case_memberships(user_id);
 
 -- 3. COMPANY PROFILE
 CREATE TABLE IF NOT EXISTS company_profiles (
@@ -35,6 +53,7 @@ CREATE TABLE IF NOT EXISTS company_profiles (
     extra JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_unique_case_version ON company_profiles(case_id, version);
 
 -- 4. ANALYSIS RUN
 CREATE TABLE IF NOT EXISTS analysis_runs (
@@ -42,14 +61,27 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     case_id UUID REFERENCES cases(id) ON DELETE CASCADE,
     profile_id UUID REFERENCES company_profiles(id) ON DELETE SET NULL,
     status VARCHAR(50) DEFAULT 'running',
+    review_status VARCHAR(30) NOT NULL DEFAULT 'draft' CHECK (review_status IN ('draft', 'submitted', 'reviewed', 'changes_requested', 'released')),
     ai_run_id VARCHAR(100),
     review_packet JSONB,
     thread_id VARCHAR(100), -- LangGraph checkpoint thread_id
+    submitted_at TIMESTAMP WITH TIME ZONE,
+    submitted_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at TIMESTAMP WITH TIME ZONE,
+    reviewed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    review_comment TEXT,
+    released_at TIMESTAMP WITH TIME ZONE,
+    released_by UUID REFERENCES users(id) ON DELETE SET NULL,
     started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     finished_at TIMESTAMP WITH TIME ZONE
 );
 
 -- 5. PEER COMPANIES (Verified universe from SEC EDGAR)
+CREATE TABLE IF NOT EXISTS peer_baseline_batches (
+    id UUID PRIMARY KEY,
+    method_version TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS peer_companies (
     baseline_id UUID,
     baseline_errors JSONB,
@@ -152,4 +184,55 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_event ON audit_logs(entity_id,decision_index) WHERE decision_index IS NOT NULL;
 
-CREATE TABLE IF NOT EXISTS report_approvals (run_id UUID PRIMARY KEY REFERENCES analysis_runs(id) ON DELETE CASCADE, digest TEXT NOT NULL, reviewer_sid TEXT NOT NULL, approved_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS report_approvals (
+    run_id UUID PRIMARY KEY REFERENCES analysis_runs(id) ON DELETE CASCADE,
+    digest TEXT NOT NULL,
+    reviewer_sid TEXT NOT NULL,
+    actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    actor_type VARCHAR(20) NOT NULL DEFAULT 'windows_sid',
+    approved_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS report_review_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    run_id UUID NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+    stage VARCHAR(30) NOT NULL CHECK (stage IN ('submitted', 'reviewed', 'changes_requested', 'released')),
+    digest TEXT,
+    actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    actor_type VARCHAR(20) NOT NULL DEFAULT 'web_user',
+    actor_sid TEXT,
+    comment TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_review_events_run ON report_review_events(run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS run_commands (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    run_id UUID NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+    thread_id VARCHAR(100) NOT NULL,
+    client_message_id VARCHAR(128) NOT NULL,
+    prompt_id VARCHAR(64),
+    command_hash TEXT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'applied', 'failed')),
+    response_payload JSONB DEFAULT '{}'::jsonb,
+    error_detail TEXT,
+    actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (run_id, client_message_id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    run_id UUID NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+    seq_no INT NOT NULL,
+    sender_type VARCHAR(20) NOT NULL CHECK (sender_type IN ('agent', 'user', 'system')),
+    sender_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    message_type VARCHAR(30) NOT NULL,
+    prompt_id VARCHAR(64),
+    client_message_id VARCHAR(128),
+    body TEXT NOT NULL,
+    payload JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (run_id, seq_no)
+);

@@ -12,8 +12,15 @@ from covenant_ai.providers.edgar import (
 @pytest.fixture
 def edgar_provider_factory():
     """Build an EDGAR provider with explicit synthetic prices for deterministic tests."""
-    def make_provider(*tickers: str, price: Decimal = Decimal("300")) -> EdgarMarketDataProvider:
-        provider = EdgarMarketDataProvider(snapshot_prices={})
+    def make_provider(
+        *tickers: str,
+        price: Decimal = Decimal("300"),
+        method_version: str | None = None,
+    ) -> EdgarMarketDataProvider:
+        kwargs = {"snapshot_prices": {}}
+        if method_version is not None:
+            kwargs["method_version"] = method_version
+        provider = EdgarMarketDataProvider(**kwargs)
         provider.test_share_counts = {}
 
         for ticker in tickers:

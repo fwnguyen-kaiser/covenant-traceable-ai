@@ -7,7 +7,7 @@ from covenant_ai.tools.fetch import fetch_peer_financials
 
 
 def with_raw_ebitda(data, da_ratio=Decimal("0.1")):
-    """Đổi fixture cũ (có sẵn 'ebitda') sang 4 dòng GAAP thô, giữ nguyên EBITDA."""
+    """Expand shorthand 'ebitda' fixtures into 4 raw GAAP lines while keeping EBITDA constant."""
     out = {}
     for ticker, metrics in data.items():
         m = dict(metrics)
@@ -56,7 +56,7 @@ def test_missing_field_is_retryable():
 
 
 def test_missing_ebitda_input_is_retryable():
-    # EBITDA giờ được tính từ 4 dòng thô: thiếu D&A thì không dựng được EBITDA
+    # EBITDA is derived from 4 raw lines: missing D&A cannot build EBITDA
     data = {t: dict(v) for t, v in DATA.items()}
     del data["C"]["depreciation_amortization"]
     _, ledger = fetch_peer_financials(FakeProvider(data), TICKERS, "LTM")

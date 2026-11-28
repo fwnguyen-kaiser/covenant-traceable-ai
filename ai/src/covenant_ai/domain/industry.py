@@ -98,9 +98,9 @@ INDUSTRIES: dict[Industry, IndustryProfile] = {
     ),
     Industry.PACKAGED_FOODS: IndustryProfile(
         label="Packaged foods",
-        sic_codes=("2000", "2013", "2020", "2030", "2040", "2050", "2052", "2060", "2090"),
+        sic_codes=("2000", "2013", "2015", "2020", "2030", "2033", "2040", "2050", "2052", "2060", "2086", "2090"),
         candidate_tickers=(
-            "GIS", "CAG", "CPB", "SJM", "HRL", "MKC", "LANC", "JJSF",
+            "GIS", "CAG", "CPB", "SJM", "PPC", "CELH", "HRL", "MKC", "LANC", "JJSF",
             "THS", "POST", "FLO", "BGS", "SMPL", "HSY", "TR", "LW", "HAIN", "KHC",
         ),
     ),
@@ -162,12 +162,24 @@ INDUSTRIES: dict[Industry, IndustryProfile] = {
     ),
     Industry.COMMERCIAL_SERVICES: IndustryProfile(
         label="Commercial / B2B services",
-        sic_codes=("7340", "7380", "7381", "8744"),
+        sic_codes=(
+            "7340",
+            "7361",
+            "7363",
+            "7380",
+            "7381",
+            "8711",
+            "8734",
+            "8741",
+            "8744",
+            "4953",
+        ),
         candidate_tickers=(
             "ABM", "ROL", "BCO", "ADT", "BV", "FA", "VRRM", "HCSG", "MMS",
-            "CBZ", "UNF", "CTAS",
+            "CBZ", "UNF", "CTAS", "RHI", "MAN", "KFRC", "NSP", "KFY",
+            "ACM", "ULS", "RSG", "CWST", "IT",
         ),
-        note="Weakest industry, see module docstring. SIC 7389 excluded.",
+        note="Includes B2B facilities, security, staffing/PEO, engineering/testing, and environmental services; SIC 7389 excluded.",
     ),
 }
 

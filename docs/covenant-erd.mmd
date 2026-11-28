@@ -1,215 +1,180 @@
 erDiagram
   USER ||--o{ CASE : owns
-  USER ||--o{ CASE_ASSIGNMENT : "assigned as analyst"
-  CASE ||--o{ CASE_ASSIGNMENT : has
+  USER ||--o{ CASE_MEMBERSHIP : "assigned as"
+  CASE ||--o{ CASE_MEMBERSHIP : grants
   USER ||--o{ AUDIT_LOG : acts
-  USER ||--o{ ANALYST_NOTE : writes
-  CASE ||--o{ INTERVIEW_MESSAGE : has
   CASE ||--o{ COMPANY_PROFILE : versions
-  CASE ||--o{ ANALYSIS_RUN : has
-  CASE ||--o{ ANALYST_NOTE : has
-  COMPANY_PROFILE ||--o{ OWNER_OBJECTIVE : includes
-  COMPANY_PROFILE ||--o{ ANALYSIS_RUN : "snapshot for"
-  METHODOLOGY_VERSION ||--o{ ANALYSIS_RUN : governs
-  RUBRIC_VERSION ||--o{ ANALYSIS_RUN : "scored with"
-  RUBRIC_VERSION ||--o{ CRITERION : contains
-  ANALYSIS_RUN ||--o{ PEER_CANDIDATE : proposes
-  ANALYSIS_RUN ||--o{ ASSUMPTION : uses
-  ANALYSIS_RUN ||--o{ FINANCIAL_DATAPOINT : collects
+  CASE ||--o{ ANALYSIS_RUN : executes
+  COMPANY_PROFILE ||--o{ ANALYSIS_RUN : "frozen profile"
+  ANALYSIS_RUN ||--o{ PEER_CANDIDATE : scores
+  ANALYSIS_RUN ||--o{ FINANCIAL_DATAPOINT : freezes
   ANALYSIS_RUN ||--o| VALUATION_RESULT : produces
-  ANALYSIS_RUN ||--o{ STRATEGIC_ALTERNATIVE : evaluates
-  ANALYSIS_RUN ||--o{ INFORMATION_GAP : has
-  ANALYSIS_RUN ||--o{ REGULATORY_FLAG : raises
-  ANALYSIS_RUN ||--o| REPORT : produces
-  ANALYSIS_RUN |o--o{ ANALYST_NOTE : "about"
-  PEER_CANDIDATE |o--o{ FINANCIAL_DATAPOINT : describes
-  DATA_SOURCE ||--o{ FINANCIAL_DATAPOINT : supplies
-  DATA_SNAPSHOT ||--o{ FINANCIAL_DATAPOINT : backs
-  STRATEGIC_ALTERNATIVE ||--o{ ALTERNATIVE_SCORE : scored
-  CRITERION ||--o{ ALTERNATIVE_SCORE : "scored on"
-  REPORT ||--o{ REPORT_SECTION : contains
+  ANALYSIS_RUN ||--o| REPORT_APPROVAL : "releases digest"
+  ANALYSIS_RUN ||--o{ REPORT_REVIEW_EVENT : tracks
+  ANALYSIS_RUN ||--o{ RUN_COMMAND : "deduplicates turns"
+  ANALYSIS_RUN ||--o{ CHAT_MESSAGE : logs
+  PEER_COMPANY ||..o{ PEER_CANDIDATE : "referenced ticker"
 
   USER {
     uuid id PK
     string email
     string password_hash
-    string role "admin | analyst | user"
+    string role "analyst | reviewer | admin"
+    boolean is_active
+    boolean can_release_report
+    boolean credentials_verified
+    bigint django_user_id "1:1 link to Django auth_user"
     timestamp created_at
   }
   CASE {
     uuid id PK
     uuid owner_id FK
     string company_name
-    string status "draft | interviewed | peers_approved | assumptions_approved | valued | alternatives_evaluated | reported | closed"
+    string status "active | archived"
+    string management_mode "legacy_cli | web_managed"
+    timestamp archived_at
+    uuid archived_by FK
     timestamp created_at
     timestamp updated_at
   }
-  CASE_ASSIGNMENT {
+  CASE_MEMBERSHIP {
     uuid id PK
     uuid case_id FK
-    uuid analyst_id FK
-    timestamp assigned_at
-  }
-  INTERVIEW_MESSAGE {
-    uuid id PK
-    uuid case_id FK
-    int seq
-    string role "assistant | user"
-    text content
+    uuid user_id FK
+    string role "analyst | reviewer | release_admin"
+    uuid assigned_by FK
+    timestamp created_at
   }
   COMPANY_PROFILE {
     uuid id PK
     uuid case_id FK
-    int version
+    int version "unique (case_id, version)"
     string industry
     string geography
-    decimal revenue
-    decimal ebitda
-    json extra
-  }
-  OWNER_OBJECTIVE {
-    uuid id PK
-    uuid profile_id FK
-    string key "liquidity | control | timeline | risk_tolerance"
-    string value
-    decimal priority_weight
-  }
-  METHODOLOGY_VERSION {
-    uuid id PK
-    string version
-    text description
-    date effective_from
-  }
-  RUBRIC_VERSION {
-    uuid id PK
-    string version
-    json entries "pathway x criterion scores"
-    date effective_from
-  }
-  CRITERION {
-    uuid id PK
-    uuid rubric_id FK
-    string name
-    text description
+    numeric revenue
+    numeric ebitda
+    numeric total_debt
+    numeric cash
+    jsonb extra "intake_answers + profile_digest + schedule"
+    timestamp created_at
   }
   ANALYSIS_RUN {
     uuid id PK
     uuid case_id FK
     uuid profile_id FK
-    uuid methodology_id FK
-    uuid rubric_id FK
-    string status "running | awaiting_peer_approval | awaiting_assumption_approval | done | failed"
-    string ai_run_id
+    string status "running | completed | insufficient_peers | failed"
+    string review_status "draft | submitted | reviewed | changes_requested | released"
+    string thread_id "unique LangGraph thread_id"
+    jsonb review_packet "frozen packet + lineage + sources + method_version"
+    uuid submitted_by FK
+    uuid reviewed_by FK
+    uuid released_by FK
+    text review_comment
     timestamp started_at
     timestamp finished_at
+  }
+  PEER_COMPANY {
+    string ticker PK
+    string cik
+    string company_name
+    string industry
+    string sic_code
+    string exchange
+    string ev_tier
+    string sub_industry
+    string customer_type "b2b | b2c | gov | mixed"
+    boolean ev_ebitda_eligible
+    uuid baseline_id
+    jsonb baseline_errors
+    boolean verified
   }
   PEER_CANDIDATE {
     uuid id PK
     uuid run_id FK
     string ticker
-    string cik
-    string rationale
-    string status "proposed | approved | rejected"
-    uuid decided_by FK
-    decimal ev_ebitda
-    boolean in_range
-  }
-  DATA_SOURCE {
-    uuid id PK
-    string name
-    string type "user_provided | sec_filing | market_data"
-    string base_url
-    text notes
-  }
-  DATA_SNAPSHOT {
-    uuid id PK
-    string payload_ref
-    string content_hash
-    timestamp retrieved_at
+    int rank_order
+    numeric total_score
+    numeric business_score
+    numeric financial_score
+    numeric size_distance
+    string status "selected | reserve | failed | disqualified"
+    jsonb rationale
+    text drop_reason
   }
   FINANCIAL_DATAPOINT {
     uuid id PK
-    uuid run_id FK
-    uuid peer_id FK "null = target company"
-    uuid source_id FK
-    uuid snapshot_id FK
+    uuid origin_id "lineage origin UUID before run copy"
+    uuid baseline_id "NULL on run snapshots"
+    uuid run_id FK "NULL = seeded baseline"
+    string peer_ticker "NULL = target company"
     string metric
-    decimal value
+    numeric value
     string currency
+    string period "FY | LTM"
     date period_end
-    string source_ref "accession no. or field"
-    string source_url
+    string source_type "user_provided | sec_filing | market_data"
+    text source_ref
     timestamp retrieved_at
-  }
-  ASSUMPTION {
-    uuid id PK
-    uuid run_id FK
-    string key
-    string value
-    string origin "default | ai_proposed | user_set"
-    uuid approved_by FK
-    timestamp approved_at
   }
   VALUATION_RESULT {
     uuid id PK
     uuid run_id FK
-    decimal ev_low
-    decimal ev_mid
-    decimal ev_high
-    text limitations
+    numeric ev_low
+    numeric ev_mid
+    numeric ev_high
+    numeric equity_low
+    numeric equity_mid
+    numeric equity_high
+    jsonb multiples_used
+    jsonb sales_multiples_used
+    jsonb peer_stats
+    jsonb outlier_flags
+    jsonb excluded_peers
+    text[] limitations
+    text explanation_md
+    string audit_verdict
+    jsonb audit_findings
+    string prompt_version
   }
-  STRATEGIC_ALTERNATIVE {
+  REPORT_APPROVAL {
+    uuid run_id PK
+    text digest "SHA-256 of canonical review_packet"
+    text reviewer_sid
+    uuid actor_id FK
+    string actor_type "windows_sid | web_user"
+    timestamptz approved_at
+  }
+  REPORT_REVIEW_EVENT {
     uuid id PK
     uuid run_id FK
-    string pathway "strategic_sale | sponsor_sale | mbo | minority | hold_prepare"
-    boolean eligible
-    text eligibility_note
-    decimal total_score
-    int rank
-    text rationale
+    string stage "submitted | reviewed | changes_requested | released"
+    text digest
+    uuid actor_id FK
+    string actor_type "web_user | windows_sid"
+    text comment
+    timestamptz created_at
   }
-  ALTERNATIVE_SCORE {
-    uuid id PK
-    uuid alternative_id FK
-    uuid criterion_id FK
-    decimal score
-    decimal weight
-    text rationale
-  }
-  INFORMATION_GAP {
+  RUN_COMMAND {
     uuid id PK
     uuid run_id FK
-    string field
-    string impact
-    string resolution "requested | qualified | resolved"
+    string thread_id
+    string client_message_id "unique (run_id, client_message_id)"
+    string prompt_id
+    text command_hash
+    string status "pending | applied | failed"
+    jsonb response_payload
+    uuid actor_id FK
   }
-  REGULATORY_FLAG {
+  CHAT_MESSAGE {
     uuid id PK
     uuid run_id FK
-    string topic
-    text note "preliminary flag, not legal advice"
-  }
-  REPORT {
-    uuid id PK
-    uuid run_id FK
-    string status "draft | validated | final"
-    timestamp generated_at
-  }
-  REPORT_SECTION {
-    uuid id PK
-    uuid report_id FK
-    string section_key
-    int seq
-    text content_md
-  }
-  ANALYST_NOTE {
-    uuid id PK
-    uuid case_id FK
-    uuid run_id FK
-    uuid author_id FK
-    text note
-    text override_justification
-    timestamp created_at
+    int seq_no "unique (run_id, seq_no)"
+    string sender_type "agent | user | system"
+    string message_type "prompt | answer | status | draft_link | error"
+    string prompt_id
+    string client_message_id
+    text body
+    jsonb payload
   }
   AUDIT_LOG {
     uuid id PK
@@ -217,6 +182,7 @@ erDiagram
     string action
     string entity_type
     uuid entity_id
-    json detail
+    int decision_index "unique (entity_id, decision_index)"
+    jsonb detail
     timestamp created_at
   }

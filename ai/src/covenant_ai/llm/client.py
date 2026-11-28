@@ -1,8 +1,16 @@
-"""Provider-agnostic LLM client protocol, 2-tier task routing, and interceptor hook."""
+"""Provider-agnostic LLM client protocol, workload-aware routing, and error taxonomy.
+
+Architecture Decision (ADR):
+- Centralize per-workload timeout budgets ('fast_interactive' for intake/audit vs.
+  'writer_longform' for executive commentary) alongside 2-tier model selection.
+- Preserve strict zero-implicit-remote guarantee: build_default_llm_client()
+  always returns None and require_local_client() rejects non-local clients.
+"""
 from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, TypeVar
 
@@ -11,6 +19,58 @@ from pydantic import BaseModel
 T = TypeVar("T", bound=BaseModel)
 
 WRITER_TASKS: frozenset[str] = frozenset({"explain_narrative", "narrative"})
+
+
+class LLMWorkload(StrEnum):
+    """Execution profile controlling model tier and HTTP timeout budgets."""
+
+    FAST_INTERACTIVE = "fast_interactive"
+    WRITER_LONGFORM = "writer_longform"
+
+
+class LLMClientError(RuntimeError):
+    """Normalized provider failure preserving retryability and workload context."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        task_name: str,
+        model_name: str = "",
+        category: str = "provider_error",
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.task_name = task_name
+        self.model_name = model_name
+        self.category = category
+        self.retryable = retryable
+
+
+class LLMTimeoutError(LLMClientError):
+    """Timeout waiting for structured model output."""
+
+    def __init__(self, message: str, *, task_name: str, model_name: str = "") -> None:
+        super().__init__(
+            message,
+            task_name=task_name,
+            model_name=model_name,
+            category="timeout",
+            retryable=True,
+        )
+
+
+class LLMRateLimitError(LLMClientError):
+    """Upstream quota or rate-limit rejection (retryable)."""
+
+    def __init__(self, message: str, *, task_name: str, model_name: str = "") -> None:
+        super().__init__(
+            message,
+            task_name=task_name,
+            model_name=model_name,
+            category="rate_limit",
+            retryable=True,
+        )
 
 
 def _read_env_or_dotenv(name: str) -> str | None:
@@ -34,19 +94,41 @@ def _read_env_or_dotenv(name: str) -> str | None:
 
 
 DEFAULT_LLM_MODEL = "gemini-2.5-flash"
+DEFAULT_TIMEOUT_S = 45.0
 
 
 class LLMConfig(BaseModel):
-    """Single-SDK 2-tier model routing configuration resolved from env variables."""
+    """Single-SDK 2-tier model and workload-timeout routing resolved from env variables."""
 
     fast_model: str = DEFAULT_LLM_MODEL
     writer_model: str = DEFAULT_LLM_MODEL
     temperature: float = 0.0
-    timeout_s: float = 45.0
+    timeout_s: float = DEFAULT_TIMEOUT_S
+    fast_timeout_s: float = 25.0
+    writer_timeout_s: float = 60.0
+    max_retries: int = 1
+
+    def resolve_workload(self, task_name: str) -> LLMWorkload:
+        """Map task name to latency/output budget workload."""
+        if task_name in WRITER_TASKS:
+            return LLMWorkload.WRITER_LONGFORM
+        return LLMWorkload.FAST_INTERACTIVE
 
     def resolve_model(self, task_name: str) -> str:
         """Select writer model for IB prose, fast model for intake and cross-version auditing."""
-        return self.writer_model if task_name in WRITER_TASKS else self.fast_model
+        return (
+            self.writer_model
+            if self.resolve_workload(task_name) == LLMWorkload.WRITER_LONGFORM
+            else self.fast_model
+        )
+
+    def resolve_timeout_s(self, task_name: str) -> float:
+        """Return explicit override timeout_s if customized, otherwise workload-specific bound."""
+        if self.timeout_s != DEFAULT_TIMEOUT_S:
+            return float(self.timeout_s)
+        if self.resolve_workload(task_name) == LLMWorkload.WRITER_LONGFORM:
+            return float(self.writer_timeout_s)
+        return float(self.fast_timeout_s)
 
     @classmethod
     def from_env(cls) -> "LLMConfig":

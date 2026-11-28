@@ -1,0 +1,136 @@
+{% extends "deals/base.html" %}
+{% block title %}Deal Cases · Project Covenant{% endblock %}
+{% block body_attrs %}data-page="case-list"{% endblock %}
+{% block content %}
+<div class="kpi-strip tabular">
+  <div class="kpi-tile">
+    <div class="kpi-label">Visible Deal Cases</div>
+    <div class="kpi-value">{{ cases|length }}</div>
+    <div class="kpi-sub">Scoped to {{ actor.role }} RBAC membership</div>
+  </div>
+  <div class="kpi-tile">
+    <div class="kpi-label">Active Mandates</div>
+    <div class="kpi-value" style="color:var(--studio-ok);">{{ active_count }}</div>
+    <div class="kpi-sub">{{ archived_count }} archived in current filter</div>
+  </div>
+  <div class="kpi-tile">
+    <div class="kpi-label">Methodology &amp; Integrity</div>
+    <div class="kpi-value mono" style="font-size:17px;color:var(--studio-accent);">cover-gaap-v3</div>
+    <div class="kpi-sub">Point-in-time cover shares + Decimal ledger</div>
+  </div>
+  <div class="kpi-tile">
+    <div class="kpi-label">Session Clearance</div>
+    <div class="kpi-value" style="font-size:17px;">{{ actor.role|title }}</div>
+    <div class="kpi-sub">{% if actor.can_release_report %}Release authority granted{% else %}Draft / review permissions{% endif %}</div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="col" style="flex:2 1 560px;">
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h1 id="cases-table-heading" style="font-size:18px;margin:0;">Deal Cases Workspace</h1>
+          <p class="muted-note" style="margin-top:4px;margin-bottom:0;">Select a deal mandate to open its 3-zone LangGraph Valuation Studio and frozen pitchbook.</p>
+        </div>
+      </div>
+      <search>
+        <form method="get" action="/" class="row" style="align-items:end;margin-bottom:14px;gap:10px;">
+          <div class="col">
+            <label for="id_q">Search company</label>
+            <input id="id_q" name="q" value="{{ q }}" placeholder="Company name..." autocomplete="off" spellcheck="false">
+          </div>
+          <div style="width:160px;">
+            <label for="id_status">Status</label>
+            <select id="id_status" name="status">
+              <option value="active" {% if status_filter == "active" %}selected{% endif %}>Active</option>
+              <option value="archived" {% if status_filter == "archived" %}selected{% endif %}>Archived</option>
+              <option value="all" {% if status_filter == "all" %}selected{% endif %}>All</option>
+            </select>
+          </div>
+          <div>
+            <button type="submit" class="btn-secondary">Filter</button>
+          </div>
+        </form>
+      </search>
+      <div tabindex="0" role="region" aria-labelledby="cases-table-heading" class="table-wrapper thin-scroll">
+        <table>
+          <thead>
+            <tr><th>Company</th><th>Status</th><th>Mode</th><th>Updated</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            {% for c in cases %}
+            <tr>
+              <td><strong>{{ c.company_name }}</strong></td>
+              <td><span class="badge {% if c.status == 'archived' %}badge-warn{% else %}badge-ok{% endif %}">{{ c.status }}</span></td>
+              <td><span class="badge mono">{{ c.management_mode }}</span></td>
+              <td class="mono" style="font-size:12px;color:var(--studio-muted);">{{ c.updated_at }}</td>
+              <td><a class="btn btn-sm btn-secondary" href="/cases/{{ c.case_id }}/">Open</a></td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="5" style="color:var(--studio-subtle);">No cases assigned to your account match this filter.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {% if actor.role == "analyst" %}
+  <div class="col">
+    <div class="card">
+      <h2 style="font-size:16px;margin-bottom:4px;">New Draft Case</h2>
+      <p class="muted-note">Create an empty deal shell or pre-populate v1 normalized USD figures.</p>
+      <div id="create-case-error" class="error-box" style="display:none;" role="alert"></div>
+      <form id="create-case-form">
+        <label for="new_company_name">Company Name</label>
+        <input id="new_company_name" required placeholder="Northline Flow Technologies, Inc.">
+        <div class="form-grid-2">
+          <div>
+            <label for="new_industry">Initial Industry (optional)</label>
+            <select id="new_industry">
+              <option value="">-- Draft shell only --</option>
+              {% for slug, label in industries %}
+                <option value="{{ slug }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label for="new_ebitda_period">EBITDA Period</label>
+            <select id="new_ebitda_period">
+              <option value="FY">FY</option>
+              <option value="LTM">LTM</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-grid-2">
+          <div>
+            <label for="new_ebitda">Target EBITDA (USD)</label>
+            <input id="new_ebitda" inputmode="decimal" placeholder="5950000">
+          </div>
+          <div>
+            <label for="new_revenue">Revenue (USD, optional)</label>
+            <input id="new_revenue" inputmode="decimal" placeholder="42500000">
+          </div>
+        </div>
+        <div class="form-grid-2">
+          <div>
+            <label for="new_debt">Total Debt (USD, blank=unknown)</label>
+            <input id="new_debt" inputmode="decimal" placeholder="">
+          </div>
+          <div>
+            <label for="new_cash">Cash (USD, blank=unknown)</label>
+            <input id="new_cash" inputmode="decimal" placeholder="">
+          </div>
+        </div>
+        <label for="new_desc">Business Description</label>
+        <textarea id="new_desc" rows="2" placeholder="US designer of industrial filtration and fluid-handling assemblies"></textarea>
+        <div style="margin-top:14px;">
+          <button type="submit" style="width:100%;">Create Case</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

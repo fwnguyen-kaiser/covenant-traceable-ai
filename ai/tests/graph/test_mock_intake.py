@@ -52,7 +52,7 @@ def test_mock_intake_persona_a_clean_tech_founder():
     assert "__interrupt__" in s2
 
     # Step 3: Peer Review
-    peers = ["ADBE", "CRM", "INTU"]
+    peers = ["ADBE", "CRM", "SNPS"]
     final = app.invoke(Command(resume=peers), config=config)
 
     assert "__interrupt__" not in final
@@ -109,7 +109,7 @@ def test_mock_intake_persona_b_messy_family_business():
     assert "__interrupt__" in s2
 
     # Step 3: Peer Review
-    peers = ["YUM", "SBUX", "BJRI"]
+    peers = ["YUM", "DRI", "BJRI"]
     final = app.invoke(Command(resume=peers), config=config)
 
     assert "__interrupt__" not in final
@@ -123,10 +123,10 @@ def test_mock_intake_persona_b_messy_family_business():
     # Pitchbook verification: EBITDA Normalization Schedule must be itemized
     expl = final["explanation"]
     assert "Target EBITDA Normalization Schedule" in expl
-    assert "Reported EBITDA: $900,000.00" in expl
-    assert "+ Owner Comp Adjustment: $350,000.00" in expl
-    assert "+ Discretionary Perks: $120,000.00" in expl
-    assert "+ Related-Party Rent Adjustment: $180,000.00" in expl
+    assert "**Reported EBITDA**: $900,000.00" in expl
+    assert "[owner_compensation] Owner Comp Adjustment: +$350,000.00" in expl
+    assert "[discretionary_expenses] Discretionary Perks: +$120,000.00" in expl
+    assert "[related_party_rent] Related-Party Rent Adjustment: +$180,000.00" in expl
     assert "- **Normalized EBITDA**: $1,600,000.00" in expl
 
 
@@ -160,7 +160,7 @@ def test_mock_intake_persona_c_distressed_manufacturer():
     assert "__interrupt__" in s2
 
     # Step 3: Peer Review
-    peers = ["CROX", "DECK", "PVH"]
+    peers = ["PVH", "CRI", "KTB"]
     final = app.invoke(Command(resume=peers), config=config)
 
     assert "__interrupt__" not in final

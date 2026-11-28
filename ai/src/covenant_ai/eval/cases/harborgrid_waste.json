@@ -1,0 +1,30 @@
+{
+  "case_id": "harborgrid_waste",
+  "description": "FY commercial waste operator with elevated debt triggering high-leverage distress disclosure.",
+  "raw_input": "Analyze HarborGrid Commercial Services LLC, a US commercial collection and route recycling operator. In FY2025 ending 2025-12-31, B2B revenue was $28M USD with Reported EBITDA of $3.6M USD. Total debt is $72M USD and cash is $2M USD.",
+  "expected_industry": "commercial_services",
+  "expected_period": "FY",
+  "expected_normalized_ebitda": "3600000",
+  "expect_clarify": false,
+  "expect_risk_codes": ["lmm_size_spread"],
+  "scripted_intake": {
+    "company_name": "HarborGrid Commercial Services LLC",
+    "business_description": "US commercial collection and route recycling operator.",
+    "industry": "commercial_services",
+    "customer_type": "b2b",
+    "geography": "US",
+    "revenue_usd": "28000000",
+    "reported_ebitda_usd": "3600000",
+    "ebitda_period": "FY",
+    "target_fiscal_year": 2025,
+    "period_end_date": "2025-12-31",
+    "total_debt_usd": "72000000",
+    "cash_usd": "2000000",
+    "field_inferences": [
+      {"field_name": "industry", "value": "commercial_services", "evidence_quote": "commercial collection and route recycling", "confidence": 0.9},
+      {"field_name": "customer_type", "value": "b2b", "evidence_quote": "B2B revenue", "confidence": 0.95},
+      {"field_name": "ebitda_period", "value": "FY", "evidence_quote": "FY2025 ending 2025-12-31", "confidence": 0.98}
+    ]
+  },
+  "peer_tickers": ["ABM", "ROL", "BCO", "ADT", "BV"]
+}

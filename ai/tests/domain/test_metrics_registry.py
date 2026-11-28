@@ -1,33 +1,33 @@
-"""Tests giữ cho registry nhất quán. Đặt cạnh các test hiện có (vd tests/)."""
+"""Tests keeping MetricsRegistry consistent alongside domain/screening tests."""
 
 from covenant_ai.domain.bridge import VALUATION_OPTIONAL, VALUATION_REQUIRED
 from covenant_ai.domain.metrics import MetricKind, MetricsRegistry
 
 
 def test_every_input_exists_in_registry():
-    """Mọi tên trong `inputs` của derived metric phải là metric có thật."""
+    """Every input referenced by a derived metric must exist in the registry."""
     dangling = {
         m.name: [i for i in m.inputs if MetricsRegistry.get(i) is None]
         for m in MetricsRegistry.all()
     }
     dangling = {name: bad for name, bad in dangling.items() if bad}
-    assert not dangling, f"inputs không tồn tại trong registry: {dangling}"
+    assert not dangling, f"missing inputs in registry: {dangling}"
 
 
 def test_derived_have_inputs_and_raw_do_not():
     for m in MetricsRegistry.all():
         if m.kind == MetricKind.DERIVED:
-            assert m.inputs, f"{m.name} là DERIVED nhưng không có inputs"
+            assert m.inputs, f"{m.name} is DERIVED but declares no inputs"
         else:
-            assert not m.inputs, f"{m.name} là RAW nhưng lại có inputs"
+            assert not m.inputs, f"{m.name} is RAW but declares inputs"
 
 
 def test_bridge_metrics_are_raw():
-    """Bridge đọc thẳng từ ledger nên các metric đó phải là RAW."""
+    """Bridge reads directly from the ledger, so its required inputs must be RAW."""
     for name in VALUATION_REQUIRED + VALUATION_OPTIONAL:
         m = MetricsRegistry.get(name)
-        assert m is not None, f"{name} thiếu trong registry"
-        assert m.kind == MetricKind.RAW, f"{name} phải là RAW"
+        assert m is not None, f"{name} missing from registry"
+        assert m.kind == MetricKind.RAW, f"{name} must be RAW"
 
 
 def test_growth_metrics_declare_lookback():
@@ -36,7 +36,7 @@ def test_growth_metrics_declare_lookback():
     assert MetricsRegistry.get("revenue_cagr_3y").lookback_periods == 3
 
 
-# --- Cấu trúc theo sách (Rosenbaum & Pearl): Financial profile + Business profile ---
+# --- Rosenbaum & Pearl framework structure: Financial profile + Business profile ---
 
 from covenant_ai.domain.business_profile import (
     BusinessDimension,
@@ -58,7 +58,7 @@ def test_screening_categories_match_book_financial_profile():
 
 def test_every_screening_category_has_metrics():
     for cat in SCREENING_CATEGORIES:
-        assert MetricsRegistry.list_by_category(cat), f"{cat} đang trống"
+        assert MetricsRegistry.list_by_category(cat), f"{cat} has no metrics"
 
 
 def test_supplementary_not_used_for_screening():

@@ -31,10 +31,17 @@ htmlcov/
 # VS Code 
 # .vscode/
 
-# Large reference source and local Markdown notes/plans (kept untracked on disk).
+# Track only canonical project documentation; keep local notes, plans, and PDFs untracked.
 *.md
 !/README.md
 docs/*
+!docs/README.md
+!docs/product.md
+!docs/architecture.md
+!docs/reference.md
+!docs/ops.md
+!docs/eval.md
+!docs/financial-data-integrity.md
 !docs/covenant-erd.mmd
 
 # Downloaded SEC payload cache

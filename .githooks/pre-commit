@@ -1,0 +1,84 @@
+#!/bin/sh
+# Block commits containing Vietnamese text in documentation, code comments, or diffs.
+set -eu
+
+TOP="$(git rev-parse --show-toplevel)"
+export COVENANT_REPO_TOP="$TOP"
+
+PY=""
+for cand in \
+  "$TOP/ai/.venv/Scripts/python.exe" \
+  "$TOP/ai/.venv/bin/python" \
+  "$(command -v python3 2>/dev/null || true)" \
+  "$(command -v python 2>/dev/null || true)"; do
+  if [ -n "$cand" ] && "$cand" -c "import sys" >/dev/null 2>&1; then
+    PY="$cand"
+    break
+  fi
+done
+
+if [ -n "$PY" ]; then
+  "$PY" - <<'PY_EOF'
+import re
+import subprocess
+import sys
+
+VN_RE = re.compile(
+    r"[àáảãạăằắẳẵặâầấẩẫậđèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ"
+    r"ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬĐÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴ]"
+)
+ALLOW_MARKER = "# i18n-currency-fixture"
+TEXT_EXTS = (".py", ".md", ".sql", ".toml", ".yml", ".yaml", ".json", ".mmd", ".sh", ".cfg", ".ini", ".txt", ".html", ".css", ".js")
+
+staged_files = subprocess.check_output(
+    ["git", "diff", "--cached", "--name-only", "--diff-filter=AMCR"],
+    text=True,
+    encoding="utf-8",
+).splitlines()
+
+errors = []
+for path in staged_files:
+    lower = path.lower()
+    if lower.endswith(".md"):
+        blob = subprocess.check_output(["git", "show", f":{path}"], text=True, encoding="utf-8", errors="replace")
+        for idx, line in enumerate(blob.splitlines(), 1):
+            if VN_RE.search(line):
+                errors.append(f"{path}:{idx}: {line.strip()[:120]}")
+    elif lower.endswith(TEXT_EXTS) or lower == ".gitignore":
+        diff = subprocess.check_output(
+            ["git", "diff", "--cached", "-U0", "--", path],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        for line in diff.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                content = line[1:]
+                if ALLOW_MARKER in content:
+                    continue
+                if VN_RE.search(content):
+                    errors.append(f"{path} (added line): {content.strip()[:120]}")
+
+if errors:
+    sys.stderr.write(
+        "COMMIT BLOCKED: Vietnamese text is disallowed in README, comments, and tracked repository files.\n"
+        "Rewrite the lines below in English (use '# i18n-currency-fixture' only for negative FX test inputs):\n"
+    )
+    for err in errors[:20]:
+        sys.stderr.write(f"  - {err}\n")
+    sys.exit(1)
+PY_EOF
+elif command -v perl >/dev/null 2>&1; then
+  git diff --cached -U0 --diff-filter=AMCR | perl -CSD -ne '
+    BEGIN { $bad = 0; }
+    if (/^\+\+\+ b\/(.+)$/) { $f = $1; next; }
+    next if /\Q# i18n-currency-fixture\E/;
+    if (/^\+(?!\+\+)(.*[\x{00E0}-\x{00E3}\x{00E8}-\x{00EA}\x{00EC}\x{00ED}\x{00F2}-\x{00F5}\x{00F9}\x{00FA}\x{00FD}\x{00C0}-\x{00C3}\x{00C8}-\x{00CA}\x{00CC}\x{00CD}\x{00D2}-\x{00D5}\x{00D9}\x{00DA}\x{00DD}\x{0102}\x{0103}\x{0110}\x{0111}\x{0128}\x{0129}\x{0168}\x{0169}\x{01A0}\x{01A1}\x{01AF}\x{01B0}\x{1EA0}-\x{1EF9}].*)$/) {
+      print STDERR "COMMIT BLOCKED ($f): $1\n";
+      $bad = 1;
+    }
+    END { exit $bad ? 1 : 0; }
+  '
+else
+  echo "WARNING: Neither Python nor Perl found for English-only pre-commit verification." >&2
+fi

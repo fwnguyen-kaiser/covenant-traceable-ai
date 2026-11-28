@@ -1,0 +1,168 @@
+{% extends "deals/base.html" %}
+{% block title %}{{ case.company_name }} · Project Covenant{% endblock %}
+{% block body_attrs %}data-page="case-detail" data-case-id="{{ case.case_id }}" data-run-id="{{ selected_run_id }}"{% endblock %}
+{% block content %}
+<div class="card card-compact" style="margin-bottom:16px;">
+  <div class="card-header" style="margin-bottom:0;">
+    <div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <h1 style="font-size:19px;margin:0;">{{ case.company_name }}</h1>
+        <span class="badge {% if case.status == 'archived' %}badge-warn{% else %}badge-ok{% endif %}">{{ case.status }}</span>
+        <span class="badge mono">{{ case.management_mode }}</span>
+      </div>
+      <div class="mono" style="color:var(--studio-subtle);font-size:12px;margin-top:4px;">Case ID: {{ case.case_id }}</div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      {% if case.status == "active" %}
+        <button id="btn-archive-case" type="button" class="btn-secondary btn-sm">Archive Case</button>
+      {% else %}
+        <button id="btn-restore-case" type="button" class="btn-warn btn-sm">Restore Case</button>
+      {% endif %}
+      {% if not runs %}
+        <button id="btn-delete-case" type="button" class="btn-danger btn-sm">Delete Draft Case</button>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div id="case-banner" class="error-box" style="display:none;" role="alert"></div>
+
+<div class="studio-grid">
+  <!-- Zone 1: Left Case & Profile Rail -->
+  <aside class="studio-rail">
+    <div class="card">
+      <div class="card-header">
+        <h2 style="font-size:15px;margin:0;">Company Profile Versions</h2>
+        <span class="badge badge-accent">{% if latest_profile %}v{{ latest_profile.version }}{% else %}Draft{% endif %}</span>
+      </div>
+      <p class="muted-note">Leave debt or cash blank when unknown (distinct from <code class="mono">0</code>).</p>
+      <div id="profile-error" class="error-box" style="display:none;" role="alert"></div>
+      <form id="profile-version-form">
+        <input type="hidden" id="prof_base_version" value="{% if latest_profile %}{{ latest_profile.version }}{% endif %}">
+        <label for="prof_company_name">Company Name</label>
+        <input id="prof_company_name" value="{% if latest_profile %}{{ latest_profile.profile.company_name }}{% else %}{{ case.company_name }}{% endif %}" required>
+        <label for="prof_industry">Industry</label>
+        <select id="prof_industry" required>
+          {% for slug, label in industries %}
+            <option value="{{ slug }}" {% if latest_profile and latest_profile.profile.industry == slug %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <div class="form-grid-2">
+          <div>
+            <label for="prof_geography">Geography</label>
+            <input id="prof_geography" value="{% if latest_profile %}{{ latest_profile.profile.geography }}{% else %}US{% endif %}" required>
+          </div>
+          <div>
+            <label for="prof_period">EBITDA Period Basis</label>
+            <select id="prof_period">
+              <option value="FY" {% if latest_profile and latest_profile.profile.ebitda_period == "FY" %}selected{% endif %}>FY</option>
+              <option value="LTM" {% if latest_profile and latest_profile.profile.ebitda_period == "LTM" %}selected{% endif %}>LTM</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-grid-2">
+          <div>
+            <label for="prof_ebitda">Normalized / Reported EBITDA</label>
+            <input id="prof_ebitda" inputmode="decimal" value="{% if latest_profile %}{{ latest_profile.profile.ebitda }}{% endif %}" required>
+          </div>
+          <div>
+            <label for="prof_revenue">Revenue (USD)</label>
+            <input id="prof_revenue" inputmode="decimal" value="{% if latest_profile and latest_profile.profile.revenue is not None %}{{ latest_profile.profile.revenue }}{% endif %}">
+          </div>
+        </div>
+        <div class="form-grid-2">
+          <div>
+            <label for="prof_debt">Total Debt (USD)</label>
+            <input id="prof_debt" inputmode="decimal" value="{% if latest_profile and latest_profile.profile.total_debt is not None %}{{ latest_profile.profile.total_debt }}{% endif %}">
+          </div>
+          <div>
+            <label for="prof_cash">Cash (USD)</label>
+            <input id="prof_cash" inputmode="decimal" value="{% if latest_profile and latest_profile.profile.cash is not None %}{{ latest_profile.profile.cash }}{% endif %}">
+          </div>
+        </div>
+        <label for="prof_desc">Business Description</label>
+        <textarea id="prof_desc" rows="2" required>{% if latest_profile %}{{ latest_profile.profile.business_description }}{% endif %}</textarea>
+        <div style="margin-top:12px;">
+          <button type="submit" style="width:100%;">Save New Profile Version</button>
+        </div>
+      </form>
+
+      <h3 style="font-size:13px;margin:16px 0 8px;">Version History</h3>
+      <div tabindex="0" role="region" aria-label="Profile version history" class="table-wrapper thin-scroll" style="max-block-size:220px;">
+        <table>
+          <thead><tr><th>Ver</th><th>Industry</th><th>Basis</th><th>EBITDA</th><th>Debt / Cash</th></tr></thead>
+          <tbody class="tabular">
+            {% for p in profiles %}
+            <tr>
+              <td class="mono">v{{ p.version }}</td>
+              <td>{{ p.profile.industry }}</td>
+              <td>{{ p.profile.ebitda_period }}</td>
+              <td>${{ p.profile.ebitda }}</td>
+              <td style="font-size:12px;">{{ p.profile.total_debt|default_if_none:"unk" }} / {{ p.profile.cash|default_if_none:"unk" }}</td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="5" style="color:var(--studio-subtle);">No profile versions saved yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Zone 2: Center Agent Workflow Chat Studio -->
+  <section class="studio-chat-col">
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h2 style="font-size:15px;margin:0;">Valuation Agent Studio</h2>
+          <div style="font-size:11.5px;color:var(--studio-subtle);">LangGraph + PostgresSaver Checkpoint</div>
+        </div>
+        <button id="btn-start-run" type="button">Start Valuation Run</button>
+      </div>
+
+      <label for="run-selector">Analysis Run</label>
+      <select id="run-selector">
+        <option value="">-- Select or start a run --</option>
+        {% for r in runs %}
+          <option value="{{ r.run_id }}" {% if r.run_id == selected_run_id %}selected{% endif %}>
+            {{ r.run_id|slice:":8" }} &middot; v{{ r.profile_version|default:"?" }} &middot; {{ r.status }} ({{ r.review_status }})
+          </option>
+        {% endfor %}
+      </select>
+
+      <div id="studio-phase-stepper" class="phase-stepper" aria-label="Workflow progress"></div>
+      <div id="studio-ebitda-bridge" class="ebitda-bridge-grid" hidden></div>
+      <div id="studio-trace-box" hidden></div>
+
+      <div id="chat-log" class="chat-log thin-scroll" role="log" aria-live="polite" style="margin-top:8px;"></div>
+      <div id="chat-error" class="error-box" style="display:none;margin-top:10px;" role="alert"></div>
+      <div id="chat-prompt-box" style="display:none;"></div>
+    </div>
+  </section>
+
+  <!-- Zone 3: Right Paper Pitchbook Canvas -->
+  <section class="studio-report-col">
+    <div id="report-empty-state" class="card" style="text-align:center;padding:36px 24px;">
+      <div class="badge badge-accent" style="margin-bottom:8px;">Paper Pitchbook Preview</div>
+      <h2 style="font-size:16px;margin-bottom:6px;">Frozen Valuation Packet Canvas</h2>
+      <p class="muted-note" style="max-width:360px;margin:0 auto;">Start a valuation run and approve your peer cohort in the Agent Studio to lock the immutable SEC peer ledger, Football Field range chart, and Markdown pitchbook here.</p>
+    </div>
+
+    <div class="paper-pitchbook" id="report-card" style="display:none;">
+      <div class="paper-kicker">Frozen Indicative Valuation Packet</div>
+      <h2 class="serif-heading" style="font-size:18px;margin:4px 0 10px;color:var(--paper-text);">{{ case.company_name }}</h2>
+      <div id="report-meta" class="info-box mono" style="font-size:11.5px;"></div>
+      <div id="report-kpi-grid" class="paper-kpi-grid"></div>
+      <section id="report-notices" class="paper-notices-box" hidden>
+        <h4>Data issues for review</h4>
+        <ul></ul>
+      </section>
+      <div id="report-actions" class="report-actions-bar"></div>
+      <div id="report-exports" class="report-actions-bar"></div>
+      <div id="report-chart-football" class="chart-card" hidden></div>
+      <div id="report-chart-peers" class="chart-card" hidden></div>
+      <div id="report-md" class="report-md-rendered"></div>
+    </div>
+  </section>
+</div>
+{% endblock %}

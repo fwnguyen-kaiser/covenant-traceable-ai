@@ -47,6 +47,7 @@ from covenant_ai.domain.models import (
 class ValuationState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     ledger: NotRequired[Annotated[list[FinancialDatapoint], operator.add]]
+    trace_steps: NotRequired[Annotated[list[dict[str, Any]], operator.add]]
 
     integrity_version: NotRequired[int]
     review_decisions: NotRequired[list[dict[str, Any]]]
@@ -73,12 +74,16 @@ class ValuationState(TypedDict):
     # Computation & Quality check
     peer_financials: NotRequired[list[PeerFinancials]]
     failed_peers: NotRequired[dict[str, str]]
+    failed_peer_details: NotRequired[dict[str, dict[str, Any]]]
+    screening_failures: NotRequired[dict[str, dict[str, Any]]]
+    method_version: NotRequired[str]
     quality_issues: NotRequired[list[str]]
     needs_retry: NotRequired[bool]
     insufficient_peers: NotRequired[bool]
     retry_count: NotRequired[int]
 
     # Valuation & Explanation
+    valuation_as_of_date: NotRequired[str | None]
     valuation: NotRequired[dict]
     explanation: NotRequired[str]
 

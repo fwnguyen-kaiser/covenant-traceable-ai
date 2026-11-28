@@ -1,0 +1,188 @@
+/* Midnight Ledger — Institutional Finance Design Tokens & Color-Scheme Rules */
+
+:root {
+  color-scheme: light dark;
+
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-serif: Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, "Cascadia Code", SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* Raw Midnight Navy Dark Palette */
+  --dark-bg: #0d131f;
+  --dark-surface: #141c2c;
+  --dark-elevated: #1c263b;
+  --dark-border: rgba(148, 163, 184, 0.16);
+  --dark-border-strong: rgba(148, 163, 184, 0.30);
+  --dark-text: #f1f5f9;
+  --dark-muted: rgba(226, 232, 240, 0.78);
+  --dark-subtle: rgba(148, 163, 184, 0.78);
+  --dark-accent: #60a5fa;
+  --dark-accent-solid: #2563eb;
+  --dark-accent-hover: #1d4ed8;
+  --dark-accent-fg: #f8fafc;
+  --dark-accent-soft: rgba(59, 130, 246, 0.16);
+  --dark-ok: #34d399;
+  --dark-ok-soft: rgba(16, 185, 129, 0.16);
+  --dark-warn: #fbbf24;
+  --dark-warn-soft: rgba(245, 158, 11, 0.16);
+  --dark-danger: #f87171;
+  --dark-danger-soft: rgba(239, 68, 68, 0.16);
+
+  /* Raw Daylight Alabaster Light Palette */
+  --light-bg: #f4f6fa;
+  --light-surface: #ffffff;
+  --light-elevated: #edf1f7;
+  --light-border: rgba(15, 23, 42, 0.12);
+  --light-border-strong: rgba(15, 23, 42, 0.24);
+  --light-text: #0f172a;
+  --light-muted: #475569;
+  --light-subtle: #64748b;
+  --light-accent: #1d4ed8;
+  --light-accent-solid: #1d4ed8;
+  --light-accent-hover: #1e40af;
+  --light-accent-fg: #ffffff;
+  --light-accent-soft: rgba(29, 78, 216, 0.09);
+  --light-ok: #059669;
+  --light-ok-soft: rgba(5, 150, 105, 0.11);
+  --light-warn: #b45309;
+  --light-warn-soft: rgba(180, 83, 9, 0.11);
+  --light-danger: #dc2626;
+  --light-danger-soft: rgba(220, 38, 38, 0.11);
+
+  /* Paper Pitchbook Sheet (Component-locked crisp light sheet) */
+  --paper-bg: #fcfcfd;
+  --paper-tint: #f3f6fb;
+  --paper-border: #dce3ee;
+  --paper-text: #0f172a;
+  --paper-muted: #475569;
+  --paper-accent: #1d4ed8;
+  --paper-teal: #0f766e;
+
+  /* Active Dark Defaults (Midnight Studio is default when no explicit light override) */
+  --studio-bg: var(--dark-bg);
+  --studio-surface: var(--dark-surface);
+  --studio-elevated: var(--dark-elevated);
+  --studio-border: var(--dark-border);
+  --studio-border-strong: var(--dark-border-strong);
+  --studio-text: var(--dark-text);
+  --studio-muted: var(--dark-muted);
+  --studio-subtle: var(--dark-subtle);
+  --studio-accent: var(--dark-accent);
+  --studio-accent-solid: var(--dark-accent-solid);
+  --studio-accent-hover: var(--dark-accent-hover);
+  --studio-accent-fg: var(--dark-accent-fg);
+  --studio-accent-soft: var(--dark-accent-soft);
+  --studio-ok: var(--dark-ok);
+  --studio-ok-soft: var(--dark-ok-soft);
+  --studio-warn: var(--dark-warn);
+  --studio-warn-soft: var(--dark-warn-soft);
+  --studio-danger: var(--dark-danger);
+  --studio-danger-soft: var(--dark-danger-soft);
+
+  --scrollbar-thumb: rgba(148, 163, 184, 0.36);
+  --scrollbar-track: #141c2c;
+  --shadow-card: 0 8px 24px rgba(2, 6, 23, 0.34);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  accent-color: var(--studio-accent);
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+:root:has(> head > meta[name="color-scheme"][content="dark"]) {
+  color-scheme: dark;
+}
+
+:root:has(> head > meta[name="color-scheme"][content="light"]),
+:root[data-studio-theme="light"] {
+  color-scheme: light;
+  --studio-bg: var(--light-bg);
+  --studio-surface: var(--light-surface);
+  --studio-elevated: var(--light-elevated);
+  --studio-border: var(--light-border);
+  --studio-border-strong: var(--light-border-strong);
+  --studio-text: var(--light-text);
+  --studio-muted: var(--light-muted);
+  --studio-subtle: var(--light-subtle);
+  --studio-accent: var(--light-accent);
+  --studio-accent-solid: var(--light-accent-solid);
+  --studio-accent-hover: var(--light-accent-hover);
+  --studio-accent-fg: var(--light-accent-fg);
+  --studio-accent-soft: var(--light-accent-soft);
+  --studio-ok: var(--light-ok);
+  --studio-ok-soft: var(--light-ok-soft);
+  --studio-warn: var(--light-warn);
+  --studio-warn-soft: var(--light-warn-soft);
+  --studio-danger: var(--light-danger);
+  --studio-danger-soft: var(--light-danger-soft);
+  --scrollbar-thumb: rgba(100, 116, 139, 0.45);
+  --scrollbar-track: #edf1f7;
+  --shadow-card: 0 6px 20px rgba(15, 23, 42, 0.08);
+  accent-color: var(--studio-accent);
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: var(--studio-bg);
+  color: var(--studio-text);
+  font-family: var(--font-sans);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.serif-heading {
+  font-family: var(--font-serif);
+}
+
+.visually-hidden {
+  position: absolute;
+  clip-path: inset(50%);
+  overflow: hidden;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  white-space: nowrap;
+}
+
+.thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+@supports not (scrollbar-color: auto) {
+  .thin-scroll {
+    scrollbar-width: auto;
+  }
+  .thin-scroll::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .thin-scroll::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 999px;
+  }
+  .thin-scroll::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}

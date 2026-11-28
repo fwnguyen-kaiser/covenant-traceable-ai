@@ -1,0 +1,85 @@
+{% extends "deals/base.html" %}
+{% block title %}Review &amp; Release Queue · Project Covenant{% endblock %}
+{% block body_attrs %}data-page="review-queue"{% endblock %}
+{% block content %}
+<div class="card" style="margin-bottom:18px;">
+  <div class="card-header">
+    <div>
+      <h1 id="reviewer-queue-heading" style="font-size:18px;margin:0;">Assigned Reviewer Queue</h1>
+      <p class="muted-note" style="margin:4px 0 0;">Verify SHA-256 packet digests, GAAP disclosures, and audit findings independently from the deal analyst.</p>
+    </div>
+  </div>
+  <div id="review-error" class="error-box" style="display:none;" role="alert"></div>
+  <div tabindex="0" role="region" aria-labelledby="reviewer-queue-heading" class="table-wrapper thin-scroll">
+    <table>
+      <thead><tr><th>Case</th><th>Run / Ver</th><th>Audit</th><th>Status</th><th>SHA-256 Digest</th><th>Actions</th></tr></thead>
+      <tbody>
+        {% for item in review_items %}
+        <tr>
+          <td><a style="color:var(--studio-accent);font-weight:600;" href="/cases/{{ item.case_id }}/?run_id={{ item.run_id }}">{{ item.company_name }}</a></td>
+          <td class="mono" style="font-size:12px;">{{ item.run_id|slice:":8" }} (v{{ item.profile_version }})</td>
+          <td><span class="badge {% if item.audit_verdict == 'pass' %}badge-ok{% elif item.audit_verdict == 'warn' %}badge-warn{% else %}badge-danger{% endif %}">{{ item.audit_verdict|upper }}</span></td>
+          <td><span class="badge">{{ item.review_status }}</span></td>
+          <td><code class="mono" style="font-size:11.5px;">{{ item.digest|slice:":16" }}...</code></td>
+          <td>
+            {% if item.review_status == "submitted" %}
+              <input type="text" id="rev-comment-{{ item.run_id }}" placeholder="Review comment / change reason" style="margin-bottom:6px;">
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button type="button" class="btn-sm" data-review-action="approve" data-run-id="{{ item.run_id }}" data-digest="{{ item.digest }}">Mark Reviewed</button>
+                <button type="button" class="btn-warn btn-sm" data-review-action="reject" data-run-id="{{ item.run_id }}" data-digest="{{ item.digest }}">Request Changes</button>
+              </div>
+            {% else %}
+              <a class="btn btn-secondary btn-sm" href="/api/runs/{{ item.run_id }}/exports/xlsx">Download XLSX</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" style="color:var(--studio-subtle);">No reports assigned for review.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if actor.can_release_report %}
+<div class="card">
+  <div class="card-header">
+    <div>
+      <h2 id="release-queue-heading" style="font-size:17px;margin:0;">Release Authorization Queue (<code class="mono">report.release</code>)</h2>
+      <p class="muted-note" style="margin:4px 0 0;">Releasing marks the exact reviewed digest approved for local client export without transmitting externally.</p>
+    </div>
+  </div>
+  <div id="release-error" class="error-box" style="display:none;" role="alert"></div>
+  <div tabindex="0" role="region" aria-labelledby="release-queue-heading" class="table-wrapper thin-scroll">
+    <table>
+      <thead><tr><th>Case</th><th>Run / Ver</th><th>Audit</th><th>Status</th><th>SHA-256 Digest</th><th>Actions</th></tr></thead>
+      <tbody>
+        {% for item in release_items %}
+        <tr>
+          <td><a style="color:var(--studio-accent);font-weight:600;" href="/cases/{{ item.case_id }}/?run_id={{ item.run_id }}">{{ item.company_name }}</a></td>
+          <td class="mono" style="font-size:12px;">{{ item.run_id|slice:":8" }} (v{{ item.profile_version }})</td>
+          <td><span class="badge {% if item.audit_verdict == 'pass' %}badge-ok{% else %}badge-warn{% endif %}">{{ item.audit_verdict|upper }}</span></td>
+          <td><span class="badge">{{ item.review_status }}</span></td>
+          <td><code class="mono" style="font-size:11.5px;">{{ item.digest|slice:":16" }}...</code></td>
+          <td>
+            {% if item.review_status == "reviewed" %}
+              {% if item.audit_verdict == "warn" %}
+                <label style="display:inline-flex;align-items:center;gap:6px;margin:0 8px 6px 0;cursor:pointer;">
+                  <input type="checkbox" id="ack-warn-{{ item.run_id }}" style="width:auto;"> Acknowledge WARN findings
+                </label>
+              {% endif %}
+              <button type="button" class="btn-sm" data-release-action="release" data-run-id="{{ item.run_id }}" data-digest="{{ item.digest }}" data-verdict="{{ item.audit_verdict }}">Release Report</button>
+            {% else %}
+              <a class="btn btn-secondary btn-sm" href="/api/runs/{{ item.run_id }}/exports/xlsx">Download XLSX</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" style="color:var(--studio-subtle);">No reviewed reports waiting for release.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

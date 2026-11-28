@@ -242,7 +242,7 @@ def test_confirm_industry_override_clears_invalid_sub_industry_and_discloses_inc
     app = create_valuation_graph(FakeProvider(FIXTURE), checkpointer=MemorySaver(), llm_client=llm)
     cfg = {"configurable": {"thread_id": "override-sub-ind-1"}}
 
-    app.invoke({"raw_input": "Restaurant ordering platform, US, FY2025 $5M rev, $500k EBITDA."}, config=cfg)
+    app.invoke({"raw_input": "CrossOver Kitchen Tech: Restaurant ordering platform, US, FY2025 $5M rev, $500k EBITDA."}, config=cfg)
     s2 = app.invoke(Command(resume=Industry.RESTAURANTS.value), config=cfg)
     assert s2["industry_enum"] == Industry.RESTAURANTS.value
     assert s2["company_profile"].business_profile.sub_industry == ""
@@ -318,7 +318,8 @@ def test_cli_prompt_mode_end_to_end_live_postgres(tmp_path):
                     "({{fact:margin_spread_direction}} median {{fact:peer_median_ebitda_margin_pct}})."
                 ),
                 "key_risks_and_caveats": (
-                    "Smaller private scale ({{fact:lmm_size_ratio_pct}} of smallest peer {{fact:smallest_peer_ev}}) warrants prudence."
+                    "Smaller private scale ({{fact:lmm_size_ratio_pct}} of smallest peer {{fact:smallest_peer_ev}}) warrants prudence. "
+                    "Review disclosed equity-method investments when comparing peer earnings."
                 ),
             },
             "semantic_audit": {"verdict": "pass", "issues": []},
@@ -364,7 +365,7 @@ def test_cli_prompt_mode_end_to_end_live_postgres(tmp_path):
                 )
                 vr = cur.fetchone()
                 assert "Apex Valve Robotics" in vr[0]
-                assert "EXPLAIN_V1" == vr[3]
+                assert "EXPLAIN_V2" == vr[3]
                 assert vr[2] == "pass"
     finally:
         with psycopg.connect(db_url) as conn:
@@ -728,3 +729,309 @@ def test_confirm_industry_override_syncs_company_profile_and_postgres_version(mo
                     cur.execute("DELETE FROM audit_logs WHERE detail->>'case_id' = %s;", (str(case_id),))
                     cur.execute("DELETE FROM cases WHERE id = %s;", (str(case_id),))
             conn.commit()
+
+
+def test_intake_provenance_canonicalization_comparative_adjustment_and_clarified_vnd():
+    """Verify canonical key mapping, comparative 2-number add-back verification, and Turn-2 USD supersession."""
+    raw = (
+        "Northline Flow builds B2B pumps in US. Revenue 300 billion VND.\n"
+        "User clarification: Converted to USD for FY2025: revenue $12M, reported EBITDA $2.5M, "
+        "plus $480k of excess owner salary compensation (over a $250k market replacement), "
+        "and ambiguous legal fees of $50k or $80k."
+    )
+    llm = FakeLLMClient(
+        {
+            "intake_extract": {
+                "company_name": "Northline Flow",
+                "business_description": "B2B industrial pump manufacturer.",
+                "industry": Industry.INDUSTRIAL_MACHINERY.value,
+                "sub_industry": "fluid_flow_filtration",
+                "customer_type": CustomerType.B2B.value,
+                "geography": "US",
+                "revenue_usd": "12000000",
+                "reported_ebitda_usd": "2500000",
+                "ebitda_period": "FY",
+                "target_fiscal_year": 2025,
+                # Simulate LLM stubbornly carrying Turn-1 currency & adding numeric/description entries
+                "non_usd_currency_detected": "VND",
+                "adjustments": [
+                    {
+                        "category": AdjustmentCategory.OWNER_COMPENSATION.value,
+                        "description": "Excess owner comp",
+                        "amount_usd": "480000",
+                        "confidence": 0.95,
+                        "evidence_quote": "$480k of excess owner salary compensation (over a $250k market replacement)",
+                    },
+                    {
+                        "category": AdjustmentCategory.NON_RECURRING_CHARGES.value,
+                        "description": "Ambiguous legal fees",
+                        "amount_usd": "50000",
+                        "confidence": 0.6,
+                        "evidence_quote": "legal fees of $50k or $80k",
+                    },
+                ],
+                "field_inferences": [
+                    {
+                        "field_name": "revenue_usd",
+                        "value": "12000000",
+                        "confidence": 0.99,
+                        "evidence_quote": "$12M",
+                    },
+                    {
+                        "field_name": "business_description",
+                        "value": "B2B industrial pump manufacturer.",
+                        "confidence": 0.95,
+                        "evidence_quote": "B2B industrial pump manufacturer.",
+                    },
+                    {
+                        "field_name": "industry",
+                        "value": "industrial_machinery",
+                        "confidence": 0.95,
+                        "evidence_quote": "B2B pumps",
+                    },
+                    {
+                        "field_name": "sub_industry",
+                        "value": "fluid_flow_filtration",
+                        "confidence": 0.9,
+                        "evidence_quote": "pumps",
+                    },
+                    {
+                        "field_name": "customer_type",
+                        "value": "b2b",
+                        "confidence": 0.95,
+                        "evidence_quote": "B2B pumps",
+                    },
+                    {
+                        "field_name": "ebitda_period",
+                        "value": "FY",
+                        "confidence": 0.98,
+                        "evidence_quote": "FY2025",
+                    },
+                ],
+            }
+        }
+    )
+
+    prep = extract_intake_from_text(llm, raw)
+    # Comparative $480k over $250k is accepted, ambiguous $50k or $80k still requires confirmation
+    adjs = prep.merged_answers["adjustment_items"]
+    assert len(adjs) == 1 and adjs[0]["amount"] == "480000"
+    assert prep.clarify_needed is True
+    assert prep.clarify_payload["non_usd_currency"] is None  # Turn-2 USD superseded sticky VND
+    assert not any("revenue_usd" in inc or "business_description" in inc for inc in prep.inconsistencies)
+    assert any("superseded by confirmed USD" in inc for inc in prep.inconsistencies)
+    assert any("adjustment 2" in q.lower() for q in prep.clarify_payload["questions"])
+
+
+def test_foreign_balances_require_field_specific_usd_restatements_across_turns():
+    from covenant_ai.llm.intake_agent import finalize_intake_extraction
+    from covenant_ai.llm.schemas import IntakeExtractionResponse
+
+    response = IntakeExtractionResponse(
+        company_name="Pumps Co", business_description="Manufactures pumps",
+        geography="US", industry="industrial_machinery", ebitda_period="FY",
+        revenue_usd="12000000", reported_ebitda_usd="2000000", cash_usd="3000000",
+    )
+    raw = "Pumps Co: FY revenue 12M EUR, EBITDA 2M EUR and cash 3M EUR."
+    raw += "\nUser clarification: We manufacture pumps."
+    blocked = finalize_intake_extraction(response, raw)
+    assert blocked.clarify_needed and blocked.clarify_payload["non_usd_currency"] == "EUR"
+    assert all(key not in blocked.merged_answers for key in ("cash", "revenue", "ebitda"))
+    raw += "\nUser clarification: Revenue is USD 12M.\nUser clarification: Reported EBITDA is $2M."
+    partially_replaced = finalize_intake_extraction(response, raw)
+    assert partially_replaced.provenance["revenue"].quote_verified
+    assert partially_replaced.clarify_needed and "cash" not in partially_replaced.merged_answers
+    final = finalize_intake_extraction(response, raw + "\nUser clarification: Cash $3M.")
+    assert not final.clarify_needed
+
+
+def test_old_basis_and_gross_owner_pay_cannot_authorize_a_new_valuation():
+    from covenant_ai.llm.intake_agent import finalize_intake_extraction
+    from covenant_ai.llm.schemas import IntakeExtractionResponse
+
+    quote = "owner salary of $480k versus replacement salary of $250k"
+    response = IntakeExtractionResponse.model_validate({
+        "ebitda_period": "FY", "reported_ebitda_usd": "2000000",
+        "adjustments": [{"category": "owner_compensation", "description": "Owner pay",
+                         "amount_usd": "480000", "confidence": 1, "evidence_quote": quote}],
+    })
+    raw = f"FY adjusted EBITDA $2M, {quote}.\nUser clarification: Figures are LTM."
+    result = finalize_intake_extraction(response, raw)
+    assert result.clarify_needed
+    assert "ebitda" not in result.merged_answers
+    assert "ebitda_period" not in result.merged_answers
+    assert result.merged_answers["adjustment_items"] == []
+
+
+def test_model_only_currency_flag_survives_clarification_and_allows_usd_replacement():
+    from covenant_ai.llm.intake_agent import finalize_intake_extraction
+    from covenant_ai.llm.schemas import IntakeExtractionResponse
+
+    text = "Pump Co reports FY revenue 12M and EBITDA 2M in Danish kroner."
+    proposed = IntakeExtractionResponse(
+        company_name="Pump Co", business_description="Makes pumps", industry="industrial_machinery",
+        geography="US", ebitda_period="FY", revenue_usd="12000000", reported_ebitda_usd="2000000",
+    )
+    first = finalize_intake_extraction(proposed.model_copy(update={"non_usd_currency_detected": "DKK"}), text)
+    assert first.clarify_payload["non_usd_currency"] == "DKK"
+    text += "\nUser clarification: We manufacture pumps."
+    resumed = finalize_intake_extraction(proposed, text, existing_answers=first.merged_answers)
+    assert resumed.clarify_payload["non_usd_currency"] == "DKK"
+    assert "revenue" not in resumed.merged_answers and "ebitda" not in resumed.merged_answers
+    text += "\nUser clarification: Revenue $12M, EBITDA $2M."
+    corrected = finalize_intake_extraction(proposed, text, existing_answers=resumed.merged_answers)
+    assert not corrected.clarify_needed
+
+
+def test_transaction_date_is_not_the_financial_period_end():
+    from covenant_ai.llm.intake_agent import finalize_intake_extraction
+    from covenant_ai.llm.schemas import IntakeExtractionResponse
+
+    proposed = IntakeExtractionResponse(period_end_date="2025-12-31")
+    text = "FY2025 accounts. The acquisition closed on 2025-12-31."
+    assert "period_end_date" not in finalize_intake_extraction(proposed, text).merged_answers
+    text += "\nUser clarification: Period end date is 2025-12-31."
+    assert finalize_intake_extraction(proposed, text).merged_answers["period_end_date"] == "2025-12-31"
+
+
+def test_dollar_marker_on_ebitda_does_not_assign_usd_to_another_amount():
+    from covenant_ai.llm.intake_agent import finalize_intake_extraction
+    from covenant_ai.llm.schemas import IntakeExtractionResponse
+
+    proposed = IntakeExtractionResponse(revenue_usd="12000000", reported_ebitda_usd="2000000")
+    raw = "Revenue 12M in local currency, EBITDA $2M."
+    partial = finalize_intake_extraction(proposed, raw)
+    assert "revenue" not in partial.merged_answers and partial.merged_answers["ebitda"] == "2000000"
+    for clarified in ("Revenue 12M USD.", "All amounts are in USD: revenue 12M."):
+        result = finalize_intake_extraction(proposed, raw + "\nUser clarification: " + clarified)
+        assert result.merged_answers["revenue"] == "12000000"
+
+
+def test_overlapping_adjustment_quotes_do_not_double_count_one_charge():
+    from covenant_ai.llm.intake_agent import finalize_intake_extraction
+    from covenant_ai.llm.schemas import IntakeExtractionResponse
+
+    quotes = ("a one-time cleanup expense of $100k", "one-time cleanup expense of $100k")
+    response = IntakeExtractionResponse.model_validate({"adjustments": [
+        {"category": "non_recurring_charges", "description": "Cleanup",
+         "amount_usd": "100000", "confidence": 1, "evidence_quote": quote} for quote in quotes
+    ]})
+    result = finalize_intake_extraction(response, quotes[0])
+    assert len(result.merged_answers["adjustment_items"]) == 1
+    assert any("adjustment 2" in q for q in result.clarify_payload["questions"])
+
+
+def test_unsupported_target_identity_fiscal_year_and_routine_expense_require_confirmation():
+    from covenant_ai.llm.intake_agent import finalize_intake_extraction
+    from covenant_ai.llm.schemas import IntakeExtractionResponse
+
+    raw = "Pumps Co had FY2024 revenue of $12M.\nUser clarification: Use FY2025. Monthly cleanup expense of $100k."
+    response = IntakeExtractionResponse.model_validate({
+        "company_name": "Invented Holdings", "target_fiscal_year": 2024,
+        "adjustments": [{"category": "non_recurring_charges", "description": "Cleanup", "confidence": 1,
+                         "amount_usd": "100000", "evidence_quote": "Monthly cleanup expense of $100k"}],
+    })
+    result = finalize_intake_extraction(response, raw)
+    assert "company_name" not in result.merged_answers
+    assert "target_fiscal_year" not in result.merged_answers
+    assert result.merged_answers["adjustment_items"] == []
+    assert result.clarify_needed
+
+
+def test_local_model_timeout_recovers_through_structured_chat_without_second_model_call():
+    llm = FakeLLMClient({"intake_extract": TimeoutError("local inference unavailable")})
+    app = create_valuation_graph(FakeProvider(FIXTURE), checkpointer=MemorySaver(), llm_client=llm)
+    cfg = {"configurable": {"thread_id": "fallback-intake"}}
+    pending = app.invoke({"raw_input": "Please value this private company."}, config=cfg)
+    assert pending["__interrupt__"][0].value["structured"]
+    assert not pending.get("ledger")
+    state = app.invoke(Command(resume={
+        "company_name": "Pump Works", "business_description": "Sells pumps",
+        "geography": "US", "industry": "industrial_machinery", "revenue": "12000000",
+        "ebitda": "2000000", "ebitda_period": "LTM",
+    }), config=cfg)
+    assert state["target_ebitda"] == Decimal("2000000")
+    assert state["target_period"] == "LTM"
+    assert state["__interrupt__"][0].value["action"] == "confirm_industry"
+    assert len(llm.calls) == 1
+    again = app.invoke(Command(resume={}), config=cfg)
+    assert again["__interrupt__"][0].value["action"] == "confirm_industry"
+    peer_review = app.invoke(Command(resume="industrial_machinery"), config=cfg)
+    assert peer_review["__interrupt__"][0].value["action"] == "peer_review"
+    again = app.invoke(Command(resume={"text": "not yet"}), config=cfg)
+    assert again["__interrupt__"][0].value["action"] == "peer_review"
+    assert not again.get("peer_review_confirmed")
+
+
+def test_private_workflow_rejects_remote_client_before_model_call(monkeypatch):
+    import pytest
+    from covenant_ai.llm.client import build_default_llm_client
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-unused")
+    assert build_default_llm_client() is None
+    client = FakeLLMClient({})
+    client.local_only = False
+    with pytest.raises(ValueError, match="local processing"):
+        create_valuation_graph(FakeProvider(FIXTURE), llm_client=client)
+    assert not client.calls
+
+
+def test_period_end_with_embedded_fiscal_year_and_bilingual_usd_revenue():
+    from covenant_ai.llm.intake_agent import finalize_intake_extraction
+    from covenant_ai.llm.schemas import IntakeExtractionResponse
+
+    raw = (
+        "PulseLedger Cloud Corp. is a US fintech SaaS.\n"
+        "User clarification: All provided figures cover FY2025 ending 2025-12-31. "
+        "Doanh thu $19.2M USD, reported EBITDA $5.1M USD."
+    )
+    resp = IntakeExtractionResponse(
+        company_name="PulseLedger Cloud Corp.",
+        business_description="US fintech SaaS.",
+        industry=Industry.APPLICATION_SOFTWARE,
+        geography="US",
+        revenue_usd="19200000",
+        reported_ebitda_usd="5100000",
+        ebitda_period=EbitdaPeriod.FY,
+        target_fiscal_year=2025,
+        period_end_date="2025-12-31",
+    )
+    prep = finalize_intake_extraction(resp, raw)
+    assert not prep.clarify_needed
+    assert prep.merged_answers["period_end_date"] == "2025-12-31"
+    assert prep.merged_answers["revenue"] == "19200000"
+
+
+def test_intake_node_recovers_on_model_runtime_errors_and_strips_internal_currency_state():
+    import pytest
+    from covenant_ai.graph.nodes import make_intake_node
+
+    raw = "VietCloud Ltd builds B2B SaaS in US. Doanh thu 18 tỷ đồng.\nUser clarification: FY2025 revenue $12M USD, EBITDA $2M USD."  # i18n-currency-fixture
+    valid_after_vnd = {
+        "company_name": "VietCloud Ltd",
+        "business_description": "B2B SaaS in US.",
+        "industry": Industry.APPLICATION_SOFTWARE.value,
+        "geography": "US",
+        "revenue_usd": "12000000",
+        "reported_ebitda_usd": "2000000",
+        "ebitda_period": "FY",
+        "target_fiscal_year": 2025,
+    }
+    clean_llm = FakeLLMClient({"intake_extract": valid_after_vnd})
+    app_clean = create_valuation_graph(FakeProvider(FIXTURE), checkpointer=MemorySaver(), llm_client=clean_llm)
+    s_clean = app_clean.invoke({"raw_input": raw}, config={"configurable": {"thread_id": "strip-internal-cur"}})
+    assert s_clean["__interrupt__"][0].value["action"] == "confirm_industry"
+    assert "_currency_evidence" not in s_clean["intake_answers"]
+
+    for exc in (ValueError("Gemini returned empty structured payload"), OSError("network reset")):
+        broken_llm = FakeLLMClient({"intake_extract": exc})
+        app_err = create_valuation_graph(FakeProvider(FIXTURE), checkpointer=MemorySaver(), llm_client=broken_llm)
+        paused = app_err.invoke({"raw_input": "Value VietCloud Ltd."}, config={"configurable": {"thread_id": f"err-{type(exc).__name__}"}})
+        assert paused["__interrupt__"][0].value["structured"] is True
+        assert type(exc).__name__ in paused["__interrupt__"][0].value["error"]
+
+    remote_llm = FakeLLMClient({})
+    remote_llm.local_only = False
+    direct_node = make_intake_node(remote_llm)
+    with pytest.raises(ValueError, match="local processing"):
+        direct_node({"raw_input": "Value VietCloud Ltd."})

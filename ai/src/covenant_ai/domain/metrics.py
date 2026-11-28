@@ -262,6 +262,16 @@ _reg(
     "Free cash flow = operating_cash_flow - capex",
     ("operating_cash_flow", "capex"), "calculated",
 )
+_reg(
+    "equity_method_income", MetricCategory.BUILDING_BLOCK, RAW, "USD",
+    "Equity-method earnings/loss disclosed in XBRL (IncomeLossFromEquityMethodInvestments) for manual D2 review",
+    (), "SEC 10-K / 10-Q",
+)
+_reg(
+    "equity_method_investments", MetricCategory.BUILDING_BLOCK, RAW, "USD",
+    "Carrying value of equity-method investments (EquityMethodInvestments) for manual D2 review",
+    (), "SEC 10-K / 10-Q",
+)
 
 # ---------------------------------------------------------------------------
 # GROWTH PROFILE

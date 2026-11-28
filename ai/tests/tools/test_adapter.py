@@ -12,7 +12,7 @@ from covenant_ai.tools.envelope import ErrorCode
 
 
 def with_raw_ebitda(data, da_ratio=Decimal("0.1")):
-    """Đổi fixture cũ (có sẵn 'ebitda') sang 4 dòng GAAP thô, giữ nguyên EBITDA."""
+    """Expand shorthand 'ebitda' fixtures into 4 raw GAAP lines while keeping EBITDA constant."""
     out = {}
     for ticker, metrics in data.items():
         m = dict(metrics)
@@ -66,7 +66,7 @@ def test_fetch_writes_ledger_and_hides_numbers():
     assert len(out["ledger"]) == len(TICKERS) * len(DATA["A"])
     payload = _payload(out)
     assert payload["ok"]
-    assert payload["data"]["fetched"] == TICKERS  # LLM chỉ thấy tên ticker
+    assert payload["data"]["fetched"] == TICKERS  # LLM only observes ticker symbols
 
 
 def test_valuation_reads_ledger_and_target_from_state():
