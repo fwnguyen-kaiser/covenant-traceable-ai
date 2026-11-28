@@ -486,8 +486,12 @@ class SwePlanEndToEndTests(SimpleTestCase):
         self.assertEqual(Decimal(str(res_map["Target Cash"].value)), Decimal(0))
         self.assertEqual(str(res_map["Report Digest (SHA-256)"].value), digest)
         self.assertEqual(
-            Decimal(str(res_map["Implied EV Midpoint"].value)),
+            Decimal(str(res_map["Median-Based EV"].value)),
             Decimal(pkt_draft["valuation"]["ev_mid"]),
+        )
+        self.assertEqual(
+            Decimal(str(res_map["EV Arithmetic Midpoint ((Low+High)/2)"].value)),
+            (Decimal(pkt_draft["valuation"]["ev_low"]) + Decimal(pkt_draft["valuation"]["ev_high"])) / Decimal(2),
         )
         ws_src = wb["Sources"]
         self.assertGreaterEqual(ws_src.max_row, 50)

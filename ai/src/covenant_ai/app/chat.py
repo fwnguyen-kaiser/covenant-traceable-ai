@@ -250,10 +250,14 @@ class AgentChatService:
         thread_id = str(row[5])
         status = str(row[3])
         pending_dict: dict[str, Any] | None = None
+        checkpoint_traces: list[dict[str, Any]] | None = None
         if status == "running" and thread_id:
             rec = self.runner.inspect_or_recover_run(thread_id, actor_id=actor.user_id)
             if rec is not None:
                 status = rec.status
+                raw_traces = rec.state.get("trace_steps")
+                if isinstance(raw_traces, list) and raw_traces:
+                    checkpoint_traces = [dict(t) for t in raw_traces if isinstance(t, dict)]
                 if rec.pending_prompt is not None:
                     pending_dict = {
                         "prompt_id": rec.pending_prompt.prompt_id,
@@ -299,6 +303,15 @@ class AgentChatService:
                                 (str(run_id),),
                             ).fetchall()
 
+        studio_meta = self._build_studio_metadata(
+            run_id=run_id,
+            case_id=UUID(str(row[1])),
+            profile_id=UUID(str(row[2])) if row[2] else None,
+            status=status,
+            pending_dict=pending_dict,
+            checkpoint_traces=checkpoint_traces,
+        )
+
         return {
             "run_id": str(row[0]),
             "case_id": str(row[1]),
@@ -312,6 +325,144 @@ class AgentChatService:
             "finished_at": row[9].isoformat() if row[9] else None,
             "pending_action": pending_dict,
             "messages": [_row_to_msg(m) for m in msg_rows],
+            **studio_meta,
+        }
+
+    def _build_studio_metadata(
+        self,
+        *,
+        run_id: UUID,
+        case_id: UUID,
+        profile_id: UUID | None,
+        status: str,
+        pending_dict: dict[str, Any] | None,
+        checkpoint_traces: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        """Derive Deal Studio workflow phase, target EBITDA summary, and execution trace steps."""
+        action = str((pending_dict or {}).get("action") or "")
+        if action == "intake_clarify":
+            phase = "intake"
+        elif action == "confirm_industry":
+            phase = "industry"
+        elif action == "peer_review":
+            phase = "peers"
+        elif status == "completed":
+            phase = "completed"
+        elif status in {"insufficient_peers", "failed"}:
+            phase = status
+        else:
+            phase = "audit"
+
+        target_summary: dict[str, Any] | None = None
+        valuation_summary: dict[str, Any] | None = None
+        derived_traces: list[dict[str, Any]] = []
+
+        with psycopg.connect(self.db_url, connect_timeout=5) as conn:
+            if profile_id is not None:
+                prof_row = conn.execute(
+                    """
+                    SELECT c.company_name, p.industry, p.revenue, p.ebitda, p.total_debt, p.cash, p.extra
+                    FROM company_profiles p
+                    JOIN cases c ON c.id = p.case_id
+                    WHERE p.id = %s;
+                    """,
+                    (str(profile_id),),
+                ).fetchone()
+            else:
+                prof_row = conn.execute(
+                    """
+                    SELECT c.company_name, p.industry, p.revenue, p.ebitda, p.total_debt, p.cash, p.extra
+                    FROM company_profiles p
+                    JOIN cases c ON c.id = p.case_id
+                    WHERE p.case_id = %s
+                    ORDER BY p.version DESC
+                    LIMIT 1;
+                    """,
+                    (str(case_id),),
+                ).fetchone()
+
+            if prof_row is not None:
+                extra = dict(prof_row[6] or {})
+                sched = extra.get("adjustment_schedule") or {}
+                rep = sched.get("reported_ebitda") if isinstance(sched, dict) else None
+                adj = sched.get("total_adjustments") if isinstance(sched, dict) else None
+                norm = prof_row[3]
+                target_summary = {
+                    "company_name": str(prof_row[0]),
+                    "industry": str(prof_row[1] or ""),
+                    "ebitda_period": str(extra.get("ebitda_period") or "FY"),
+                    "revenue": str(prof_row[2]) if prof_row[2] is not None else None,
+                    "reported_ebitda": str(rep) if rep is not None else (str(norm) if norm is not None else None),
+                    "total_adjustments": str(adj) if adj is not None else "0",
+                    "normalized_ebitda": str(norm) if norm is not None else None,
+                    "total_debt": str(prof_row[4]) if prof_row[4] is not None else None,
+                    "cash": str(prof_row[5]) if prof_row[5] is not None else None,
+                }
+                derived_traces.append({
+                    "node": "intake",
+                    "status": "ok",
+                    "detail": f"Profiled {target_summary['company_name']} ({target_summary['ebitda_period']})",
+                })
+
+            peer_rows = conn.execute(
+                "SELECT ticker, status FROM peer_candidates WHERE run_id = %s ORDER BY rank_order NULLS LAST;",
+                (str(run_id),),
+            ).fetchall()
+            val_row = conn.execute(
+                """
+                SELECT ev_low, ev_mid, ev_high, equity_low, equity_mid, equity_high,
+                       audit_verdict, prompt_version
+                FROM valuation_results
+                WHERE run_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1;
+                """,
+                (str(run_id),),
+            ).fetchone()
+
+        if peer_rows:
+            selected = [str(r[0]) for r in peer_rows if r[1] == "selected"]
+            failed = [str(r[0]) for r in peer_rows if r[1] == "failed"]
+            derived_traces.append({
+                "node": "peer_candidates",
+                "status": "ok",
+                "detail": f"Evaluated {len(peer_rows)} candidate issuer(s)",
+            })
+            if selected:
+                derived_traces.append({
+                    "node": "compute",
+                    "status": "warn" if failed else "ok",
+                    "detail": f"Selected {', '.join(selected)}" + (f" ({len(failed)} excluded)" if failed else ""),
+                })
+
+        if val_row is not None:
+            verdict = str(val_row[6] or "pass")
+            valuation_summary = {
+                "ev_low": str(val_row[0]),
+                "ev_mid": str(val_row[1]),
+                "ev_high": str(val_row[2]),
+                "equity_low": str(val_row[3]) if val_row[3] is not None else None,
+                "equity_mid": str(val_row[4]) if val_row[4] is not None else None,
+                "equity_high": str(val_row[5]) if val_row[5] is not None else None,
+                "audit_verdict": verdict,
+                "prompt_version": str(val_row[7] or "DETERMINISTIC_V1"),
+            }
+            derived_traces.append({
+                "node": "valuation",
+                "status": "ok",
+                "detail": f"Computed EV range (${val_row[0]} – ${val_row[2]})",
+            })
+            derived_traces.append({
+                "node": "self_audit",
+                "status": verdict.lower(),
+                "detail": f"Self-audit verdict: {verdict.upper()} ({valuation_summary['prompt_version']})",
+            })
+
+        return {
+            "phase": phase,
+            "trace_steps": checkpoint_traces if checkpoint_traces is not None else derived_traces,
+            "target_summary": target_summary,
+            "valuation_summary": valuation_summary,
         }
 
     def submit_turn(

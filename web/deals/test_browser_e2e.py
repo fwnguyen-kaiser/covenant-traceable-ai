@@ -202,7 +202,8 @@ def test_p7_real_browser_e2e_chat_review_release_and_xlsx_download(tmp_path):
                 res_map = {ws_res.cell(r, 1).value: ws_res.cell(r, 2) for r in range(2, ws_res.max_row + 1)}
                 assert res_map["Target Total Debt"].value is None
                 assert Decimal(str(res_map["Target Cash"].value)) == Decimal(0)
-                assert Decimal(str(res_map["Implied EV Midpoint"].value)) > 0
+                assert Decimal(str(res_map["Median-Based EV"].value)) > 0
+                assert Decimal(str(res_map["EV Arithmetic Midpoint ((Low+High)/2)"].value)) > 0
                 assert wb["Sources"].max_row >= 50
                 ctx_d.close()
                 ctx_a2.close()

@@ -106,6 +106,7 @@ class PeerDatapointBuilder:
         source_ref: str,
         retrieved_at: datetime,
         currency: str = "USD",
+        filing_date: date | None = None,
     ) -> FinancialDatapoint:
         """Central factory eliminating duplicate FinancialDatapoint field wiring."""
         return FinancialDatapoint(
@@ -114,6 +115,7 @@ class PeerDatapointBuilder:
             currency=currency,
             period=period,
             period_end=period_end,
+            filing_date=filing_date,
             source_type=source_type,
             source_ref=source_ref,
             retrieved_at=retrieved_at,
@@ -880,11 +882,13 @@ class PeerDatapointBuilder:
         )
 
         now = self.clock()
+        inc_filed_dt = date.fromisoformat(inc_data.filed) if getattr(inc_data, "filed", None) else None
+        inc_filed_tag = f" filed:{inc_data.filed}" if getattr(inc_data, "filed", None) else ""
         pts = [
             self.make_datapoint(ticker=ticker, metric="market_cap", value=mcap_val, period=target_period, period_end=price_date, source_type=SourceType.MARKET_DATA, source_ref=mcap_ref, retrieved_at=now),
             self.make_datapoint(ticker=ticker, metric="total_debt", value=total_debt, period=target_period, period_end=p_date, source_type=SourceType.SEC_FILING, source_ref=debt_ref, retrieved_at=now),
             self.make_datapoint(ticker=ticker, metric="cash", value=cash_val, period=target_period, period_end=p_date, source_type=SourceType.SEC_FILING, source_ref=f"SEC 10-K accn:{cash_item.accn} tag:{cash_tag}{note_suffix}", retrieved_at=now),
-            self.make_datapoint(ticker=ticker, metric="income_continuing_ops", value=inc_data.value, period=target_period, period_end=p_date, source_type=SourceType.SEC_FILING, source_ref=f"SEC 10-K accn:{inc_data.accn} tag:{inc_data.tag}{note_suffix}", retrieved_at=now),
+            self.make_datapoint(ticker=ticker, metric="income_continuing_ops", value=inc_data.value, period=target_period, period_end=p_date, filing_date=inc_filed_dt, source_type=SourceType.SEC_FILING, source_ref=f"SEC 10-K accn:{inc_data.accn} tag:{inc_data.tag}{inc_filed_tag}{note_suffix}", retrieved_at=now),
             self.make_datapoint(ticker=ticker, metric="interest_expense_net", value=int_val, period=target_period, period_end=p_date, source_type=SourceType.SEC_FILING, source_ref=f"{int_ref}{note_suffix}", retrieved_at=now),
             self.make_datapoint(ticker=ticker, metric="income_tax_expense", value=tax_data.value, period=target_period, period_end=p_date, source_type=SourceType.SEC_FILING, source_ref=f"SEC 10-K accn:{tax_data.accn} tag:{tax_data.tag}{note_suffix}", retrieved_at=now),
             self.make_datapoint(ticker=ticker, metric="depreciation_amortization", value=da_data.value, period=target_period, period_end=p_date, source_type=SourceType.SEC_FILING, source_ref=f"SEC 10-K accn:{da_data.accn} tag:{da_data.tag}{note_suffix}", retrieved_at=now),
@@ -1007,7 +1011,7 @@ class PeerDatapointBuilder:
                 method_version=eff_method,
             )
 
-        q_end, _, _, q_accn, q_fp = max(q_cands)
+        q_end, q_filed, _, q_accn, q_fp = max(q_cands)
         q_date = date.fromisoformat(q_end)
 
         inc_ltm = self.fact_reader.calc_ltm_same_tag(gaap, TAG_INCOME_CONTINUING, fy_end, q_end, q_fp, q_accn)
@@ -1102,11 +1106,13 @@ class PeerDatapointBuilder:
 
         now = self.clock()
         ltm_span = f"{fy_end} + {q_fp} {q_end} - {inc_ltm.prior_end}"
+        q_filed_dt = date.fromisoformat(q_filed) if q_filed else None
+        q_filed_tag = f" filed:{q_filed}" if q_filed else ""
         pts = [
             self.make_datapoint(ticker=ticker, metric="market_cap", value=mcap_val, period="LTM", period_end=price_date, source_type=SourceType.MARKET_DATA, source_ref=mcap_ref, retrieved_at=now),
             self.make_datapoint(ticker=ticker, metric="total_debt", value=total_debt, period="LTM", period_end=q_date, source_type=SourceType.SEC_FILING, source_ref=debt_ref, retrieved_at=now),
             self.make_datapoint(ticker=ticker, metric="cash", value=cash_val, period="LTM", period_end=q_date, source_type=SourceType.SEC_FILING, source_ref=f"SEC 10-Q MRQ accn:{cash_item.accn} tag:{cash_tag}", retrieved_at=now),
-            self.make_datapoint(ticker=ticker, metric="income_continuing_ops", value=inc_ltm.value, period="LTM", period_end=q_date, source_type=SourceType.SEC_FILING, source_ref=f"SEC LTM ({ltm_span}) accn:{inc_ltm.accn} FY:{inc_ltm.fy_accn} prior:{inc_ltm.prior_accn} tag:{inc_ltm.tag}", retrieved_at=now),
+            self.make_datapoint(ticker=ticker, metric="income_continuing_ops", value=inc_ltm.value, period="LTM", period_end=q_date, filing_date=q_filed_dt, source_type=SourceType.SEC_FILING, source_ref=f"SEC LTM ({ltm_span}) accn:{inc_ltm.accn} FY:{inc_ltm.fy_accn} prior:{inc_ltm.prior_accn} tag:{inc_ltm.tag}{q_filed_tag}", retrieved_at=now),
             self.make_datapoint(ticker=ticker, metric="interest_expense_net", value=int_val, period="LTM", period_end=q_date, source_type=SourceType.SEC_FILING, source_ref=int_ref, retrieved_at=now),
             self.make_datapoint(ticker=ticker, metric="income_tax_expense", value=tax_ltm.value, period="LTM", period_end=q_date, source_type=SourceType.SEC_FILING, source_ref=f"SEC LTM ({ltm_span}) accn:{tax_ltm.accn} FY:{tax_ltm.fy_accn} prior:{tax_ltm.prior_accn} tag:{tax_ltm.tag}", retrieved_at=now),
             self.make_datapoint(ticker=ticker, metric="depreciation_amortization", value=da_ltm.value, period="LTM", period_end=q_date, source_type=SourceType.SEC_FILING, source_ref=f"SEC LTM ({ltm_span}) accn:{da_ltm.accn} FY:{da_ltm.fy_accn} prior:{da_ltm.prior_accn} tag:{da_ltm.tag}", retrieved_at=now),

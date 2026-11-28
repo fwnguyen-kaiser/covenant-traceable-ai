@@ -16,7 +16,7 @@ from covenant_ai.domain.models import (
     InferenceSource,
 )
 from covenant_ai.llm.client import LLMClient, require_local_client
-from covenant_ai.llm.prompts import INTAKE_SYSTEM_PROMPT
+from covenant_ai.llm.prompts import INTAKE_SYSTEM_PROMPT, build_intake_user_prompt
 from covenant_ai.llm.schemas import IntakeExtractionResponse
 
 REQUIRED_INTAKE_IDS = (
@@ -172,31 +172,11 @@ def _build_intake_user_prompt(
     existing_answers: dict[str, Any] | None = None,
     locked_overrides: dict[str, Any] | None = None,
 ) -> str:
-    allowed_industries = "\n".join(
-        f"- {ind.value}: sub_industries={list(sub_industries_for(ind)) or ['(none - leave null)']}"
-        for ind in Industry
+    return build_intake_user_prompt(
+        raw_input,
+        existing_answers=existing_answers,
+        locked_overrides=locked_overrides,
     )
-    existing_block = ""
-    if locked_overrides:
-        existing_block += f"\nLOCKED USER OVERRIDES (DO NOT CHANGE):\n{locked_overrides}\n"
-    if existing_answers:
-        known = {
-            k: v
-            for k, v in existing_answers.items()
-            if v not in (None, "", [], {}) and k not in (locked_overrides or {}) and k != "_currency_evidence"
-        }
-        if known:
-            existing_block += f"\nPRIOR EXTRACTED DRAFT (UPDATE IF USER CLARIFICATION SUPERSEDES):\n{known}\n"
-    return "\n".join([
-        "ALLOWED INDUSTRY & SUB-INDUSTRY SLUGS:",
-        allowed_industries,
-        "",
-        "ALLOWED CUSTOMER TYPES: ['b2b', 'b2c', 'gov', 'mixed'] (or null if unclear)",
-        "ALLOWED REVENUE MODELS: ['recurring_subscription', 'one_off_sales', 'project_based', 'transactional_usage', 'hybrid_mixed', 'unknown']",
-        existing_block,
-        "RAW USER INPUT:",
-        raw_input.strip(),
-    ])
 
 
 @dataclass

@@ -1,31 +1,12 @@
-"""Versioned English-only system and user prompts for Covenant AI LLM agents."""
+"""Versioned English-first system prompt and taxonomy-prefixed user builder for intake."""
 from __future__ import annotations
 
-PROMPT_VERSION_EXPLAIN = "EXPLAIN_V2"
-PROMPT_VERSION_AUDIT = "AUDIT_V2"
+from typing import Any
+
+from covenant_ai.domain.industry import Industry, sub_industries_for
+from covenant_ai.llm.prompts.shared import build_cache_ready_prompt
+
 PROMPT_VERSION_INTAKE = "INTAKE_V2"
-
-EXPLAIN_SYSTEM_PROMPT = """You are a senior Investment Banking Associate preparing an Executive Summary for a private company EV/EBITDA valuation memo.
-
-STRICT RULES (NON-NEGOTIABLE):
-1. Write 100% in concise, institutional English suitable for a live pitchbook.
-2. NEVER type raw dollar figures, valuation multiples (x), percentages (%), or counts (except referencing exact ticker symbols like ADBE or standard terms like EV/EBITDA and EV/Sales).
-3. EVERY single quantitative value MUST be written as a placeholder token using exact keys from the provided Fact Pack: {{fact:<key>}}. Examples: {{fact:implied_ev_mid}}, {{fact:ev_ebitda_median}}, {{fact:margin_spread_pct}}. Because currency, multiple, and percentage placeholders already expand with '$', 'x', or '%', ALWAYS include the financial noun before the token (e.g. write 'an implied Enterprise Value of {{fact:implied_ev_mid}}', NEVER 'an {{fact:implied_ev_mid}}').
-4. NEVER invent facts, assumptions, private-company liquidity discounts (e.g. never mention a 20% discount), M&A recommendations, or causes not supported by the Fact Pack.
-5. Cite a frozen enterprise value in valuation_positioning. Keep enterprise value and equity value distinct. When debt or cash is missing, describe the available enterprise value and the missing input. Respect the exact comparison direction supplied in the Fact Pack (e.g. margin_spread_direction = 'above' vs 'below').
-6. Surface EVERY limitation, risk warning, excluded peer note, and data inconsistency explicitly. Never hide caveats or flaws.
-"""
-
-AUDIT_SYSTEM_PROMPT = """You are an independent Investment Banking Vice President auditing an Executive Commentary draft against a Locked Fact Pack before client delivery.
-
-CHECK STRICTLY FOR:
-1. Directional contradictions: Does the prose say margins, growth, leverage, or size are higher/stronger when the Fact Pack shows they are lower/weaker (or vice versa)?
-2. Entity/Ticker attribution errors: Are peer tickers or screening ranks confused with each other?
-3. Omitted critical risks: If the Fact Pack lists high leverage/distressed capital structure, customer concentration >= 25%, LMM size spread, failed peers, or data inconsistencies, were any material caveats omitted or downplayed?
-4. Unrequested discounts or unsupported claims: Did the writer imply a non-existent private company discount or buy/sell recommendation?
-
-Return verdict 'fail' for factual/directional contradictions or omitted critical risks, 'warn' for minor phrasing ambiguity, and 'pass' if fully faithful. Return empty issues list when passing cleanly.
-"""
 
 INTAKE_SYSTEM_PROMPT = """You are an Investment Banking Analyst extracting structured company profile inputs from unstructured client descriptions for a USD-only EV/EBITDA valuation workflow.
 
@@ -37,3 +18,42 @@ STRICT RULES:
 5. ADJUSTMENT SIGN CONVENTION: Output positive amount_usd strings for add-backs that increase normalized EBITDA (excess owner salary above market replacement, personal perks, excess related-party rent, one-time charges) and negative amount_usd strings for deductions (below-market owner pay deficit, or non_recurring_income one-time gains/subsidies such as "-100000"). A gross salary or gross rent beside a market benchmark is insufficient evidence of the adjustment. Ask for the explicit excess or shortfall.
 6. CLARIFY & CORRECTION PRECEDENCE: List concise English follow-up questions for missing required facts (company_name, business_description, industry, geography, revenue_usd, reported_ebitda_usd, explicit ebitda_period FY/LTM), sanity conflicts, or non-USD currency conversion requests. If "User clarification:" text is present, those latest user statements ALWAYS supersede conflicting numbers or currencies in earlier text; only clear the currency concern for monetary fields explicitly restated in USD. A reply about another field does not convert earlier amounts.
 """
+
+
+def build_intake_taxonomy_catalog() -> str:
+    """Return invariant industry, sub-industry, customer type, and revenue model catalogs."""
+    allowed_industries = "\n".join(
+        f"- {ind.value}: sub_industries={list(sub_industries_for(ind)) or ['(none - leave null)']}"
+        for ind in Industry
+    )
+    return "\n".join([
+        "ALLOWED INDUSTRY & SUB-INDUSTRY SLUGS:",
+        allowed_industries,
+        "",
+        "ALLOWED CUSTOMER TYPES: ['b2b', 'b2c', 'gov', 'mixed'] (or null if unclear)",
+        "ALLOWED REVENUE MODELS: ['recurring_subscription', 'one_off_sales', 'project_based', 'transactional_usage', 'hybrid_mixed', 'unknown']",
+    ])
+
+
+def build_intake_user_prompt(
+    raw_input: str,
+    existing_answers: dict[str, Any] | None = None,
+    locked_overrides: dict[str, Any] | None = None,
+) -> str:
+    """Assemble cache-ready intake prompt with taxonomy prefix first and raw user input last."""
+    variable_blocks: list[str] = []
+    if locked_overrides:
+        variable_blocks.append(f"LOCKED USER OVERRIDES (DO NOT CHANGE):\n{locked_overrides}")
+    if existing_answers:
+        known = {
+            k: v
+            for k, v in existing_answers.items()
+            if v not in (None, "", [], {}) and k not in (locked_overrides or {}) and k != "_currency_evidence"
+        }
+        if known:
+            variable_blocks.append(f"PRIOR EXTRACTED DRAFT (UPDATE IF USER CLARIFICATION SUPERSEDES):\n{known}")
+    variable_blocks.append(f"RAW USER INPUT:\n{raw_input.strip()}")
+    return build_cache_ready_prompt(
+        static_blocks=[build_intake_taxonomy_catalog()],
+        variable_blocks=variable_blocks,
+    )

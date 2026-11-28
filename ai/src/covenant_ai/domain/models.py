@@ -12,6 +12,7 @@ import re
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -146,6 +147,7 @@ class FinancialDatapoint(BaseModel):
     currency: str = "USD"
     period: str = "FY"
     period_end: date | None = None   # the date through which the data is effective
+    filing_date: date | None = None  # SEC filing date when known
     source_type: SourceType
     source_ref: str  # e.g. SEC accession number or provider field name
     retrieved_at: datetime
@@ -359,6 +361,12 @@ class CompanyProfile(BaseModel):
     reported_ebitda: Decimal | None = None
     total_debt: Decimal | None = Field(default=None, ge=0)
     cash: Decimal | None = Field(default=None, ge=0)
+    debt_like_items: Decimal | None = Field(default=None, ge=0)
+    lease_liabilities: Decimal | None = Field(default=None, ge=0)
+    preferred_equity: Decimal | None = Field(default=None, ge=0)
+    minority_interest: Decimal | None = Field(default=None, ge=0)
+    pension_liabilities: Decimal | None = Field(default=None, ge=0)
+    working_capital_adjustment: Decimal | None = None
     adjustment_schedule: EbitdaAdjustmentSchedule | None = None
     business_description: str | None = None
     geography_region: GeographyRegion | None = None
@@ -415,6 +423,7 @@ class PeerFinancials(BaseModel):
     ebitda: Decimal
     ebitda_period: str  # the SEC comparable workflow uses annual "FY" data
     period_end: date | None = None
+    filing_date: date | None = None
     market_cap_date: date | None = None
     market_cap_source_ref: str | None = None
     preferred_equity: Decimal = Decimal(0)
@@ -429,19 +438,27 @@ class ValuationResult(BaseModel):
     ev_low: Decimal
     ev_mid: Decimal
     ev_high: Decimal
-    equity_low: Decimal | None = None     # Implied Equity Value = EV - Debt + Cash
+    ev_arithmetic_midpoint: Decimal | None = None
+    equity_low: Decimal | None = None     # Implied Equity Value = EV - Net Bridge Deductions
     equity_mid: Decimal | None = None
     equity_high: Decimal | None = None
+    equity_arithmetic_midpoint: Decimal | None = None
     target_net_debt: Decimal | None = None # Target debt - cash
+    target_equity_bridge: dict[str, Any] = Field(default_factory=dict)
     ebitda_period: str
     multiples_used: dict[str, Decimal]   # ticker -> EV/EBITDA multiple
     sales_multiples_used: dict[str, Decimal] = Field(default_factory=dict)  # ticker -> EV/Sales multiple
-    implied_ev_by_sales: dict[str, Decimal | None] = Field(default_factory=dict)   # low, mid, high benchmark
+    implied_ev_by_sales: dict[str, Decimal | None] = Field(default_factory=dict)   # low, median, high, arithmetic mid
     peer_stats: dict[str, dict[str, Decimal]] = Field(default_factory=dict) # min, p25, median, mean, p75, max
     excluded_peers: dict[str, str]        # ticker -> reason (removed from stats)
-    outlier_flags: dict[str, str] = Field(default_factory=dict)  # flagged but still used
+    outlier_flags: dict[str, str] = Field(default_factory=dict)  # combined compatibility flags
+    statistical_outlier_flags: dict[str, str] = Field(default_factory=dict)  # Tukey 1.5xIQR outliers ONLY
+    quartile_flags: dict[str, str] = Field(default_factory=dict)  # non-outlier < P25 or > P75 annotations
+    sensitivity: dict[str, Any] = Field(default_factory=dict)  # excluding-outlier sensitivity
     peer_flags: dict[str, dict[str, str]] = Field(default_factory=dict)
     risk_codes: list[str] = Field(default_factory=list)
+    valuation_as_of_date: date | None = None
     price_date_range: tuple[date, date] | None = None
+    data_comparability: dict[str, Any] = Field(default_factory=dict)
     assumptions: dict[str, str]
     limitations: list[str]

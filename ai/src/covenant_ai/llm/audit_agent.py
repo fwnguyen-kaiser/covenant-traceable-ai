@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from covenant_ai.domain.models import AuditVerdict
 from covenant_ai.llm.client import LLMClient, require_local_client
 from covenant_ai.llm.fact_pack import FACT_PATTERN, LockedFactPack
-from covenant_ai.llm.prompts import AUDIT_SYSTEM_PROMPT
+from covenant_ai.llm.prompts import AUDIT_SYSTEM_PROMPT, build_audit_user_prompt
 from covenant_ai.llm.schemas import AuditFinding, SemanticAuditResponse
 
 if TYPE_CHECKING:
@@ -245,12 +245,7 @@ def audit_narrative(
         return AuditVerdict.FAIL, findings
 
     if client is not None and rendered_md.strip():
-        prompt = "\n".join([
-            fact_pack.to_prompt_catalog(),
-            "",
-            "DRAFTED EXECUTIVE COMMENTARY TO AUDIT:",
-            rendered_md,
-        ])
+        prompt = build_audit_user_prompt(fact_pack, rendered_md)
         try:
             require_local_client(client)
             sem = client.generate_structured(

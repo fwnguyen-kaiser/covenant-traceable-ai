@@ -1,0 +1,31 @@
+{
+  "case_id": "clearpath_software",
+  "description": "LTM B2B recurring subscription software company verifying LTM period parity.",
+  "raw_input": "Value ClearPath Workflow Corp., a US B2B recurring subscription treasury software vendor. For LTM ending 2026-06-30, Revenue was $31M USD and Reported EBITDA was $6.8M USD. Total debt is $5M USD and cash is $7.5M USD.",
+  "expected_industry": "application_software",
+  "expected_period": "LTM",
+  "expected_normalized_ebitda": "6800000",
+  "expect_clarify": false,
+  "expect_risk_codes": ["lmm_size_spread"],
+  "scripted_intake": {
+    "company_name": "ClearPath Workflow Corp.",
+    "business_description": "US B2B recurring subscription treasury software vendor.",
+    "industry": "application_software",
+    "customer_type": "b2b",
+    "revenue_model": "recurring_subscription",
+    "geography": "US",
+    "revenue_usd": "31000000",
+    "reported_ebitda_usd": "6800000",
+    "ebitda_period": "LTM",
+    "period_end_date": "2026-06-30",
+    "total_debt_usd": "5000000",
+    "cash_usd": "7500000",
+    "field_inferences": [
+      {"field_name": "industry", "value": "application_software", "evidence_quote": "treasury software vendor", "confidence": 0.93},
+      {"field_name": "customer_type", "value": "b2b", "evidence_quote": "B2B", "confidence": 0.95},
+      {"field_name": "revenue_model", "value": "recurring_subscription", "evidence_quote": "recurring subscription", "confidence": 0.96},
+      {"field_name": "ebitda_period", "value": "LTM", "evidence_quote": "LTM ending 2026-06-30", "confidence": 0.98}
+    ]
+  },
+  "peer_tickers": ["ADBE", "CRM", "INTU", "WDAY", "ADSK"]
+}

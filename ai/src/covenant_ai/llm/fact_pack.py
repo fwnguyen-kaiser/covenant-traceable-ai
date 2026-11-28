@@ -156,20 +156,32 @@ def build_fact_pack(state: ValuationState) -> LockedFactPack:
                 cx_pct = (profile.capex / target_rev) * Decimal(100)
                 put("target_capex_to_revenue_pct", fmt_pct(cx_pct), "Target CapEx as % of revenue", cx_pct)
 
-    # Core EV & Equity bridge facts
+    # Core EV & Equity bridge facts (distinguish median-based from arithmetic midpoint)
     for field_name, fact_key, desc in (
         ("ev_low", "implied_ev_low", "Implied EV at 25th percentile EV/EBITDA"),
-        ("ev_mid", "implied_ev_mid", "Implied EV at median EV/EBITDA"),
+        ("ev_mid", "implied_ev_mid", "Median-based EV at peer median EV/EBITDA"),
         ("ev_high", "implied_ev_high", "Implied EV at 75th percentile EV/EBITDA"),
+        ("ev_arithmetic_midpoint", "implied_ev_arithmetic_mid", "Arithmetic midpoint ((EV Low + EV High) / 2)"),
         ("equity_low", "implied_equity_low", "Implied Equity Value at 25th percentile"),
-        ("equity_mid", "implied_equity_mid", "Implied Equity Value at median"),
+        ("equity_mid", "implied_equity_mid", "Median-based Equity Value at peer median EV/EBITDA"),
         ("equity_high", "implied_equity_high", "Implied Equity Value at 75th percentile"),
+        ("equity_arithmetic_midpoint", "implied_equity_arithmetic_mid", "Arithmetic Equity midpoint ((Equity Low + Equity High) / 2)"),
         ("target_net_debt", "target_net_debt", "Target Net Debt (Total Debt minus Cash)"),
     ):
         raw_v = val.get(field_name)
         if raw_v is not None:
             dv = Decimal(str(raw_v))
             put(fact_key, fmt_usd(dv), desc, dv)
+
+    # Sensitivity excluding Tukey statistical outliers
+    sens_excl = (val.get("sensitivity") or {}).get("excluding_statistical_outliers") or {}
+    if sens_excl.get("computable"):
+        if sens_excl.get("ev_ebitda_median") is not None:
+            sd = Decimal(str(sens_excl["ev_ebitda_median"]))
+            put("sensitivity_ev_ebitda_median", fmt_multiple(sd), "Peer median EV/EBITDA excluding Tukey outliers", sd)
+        if sens_excl.get("ev_mid") is not None:
+            sev = Decimal(str(sens_excl["ev_mid"]))
+            put("sensitivity_ev_mid", fmt_usd(sev), "Median-based EV excluding Tukey statistical outliers", sev)
 
     # Peer multiples & stats
     peer_stats = val.get("peer_stats") or {}
@@ -190,17 +202,18 @@ def build_fact_pack(state: ValuationState) -> LockedFactPack:
         ("ev_low", "ev_sales_implied_ev_low"),
         ("ev_mid", "ev_sales_implied_ev_mid"),
         ("ev_high", "ev_sales_implied_ev_high"),
+        ("ev_arithmetic_midpoint", "ev_sales_implied_ev_arithmetic_mid"),
     ):
-        if key_src in implied_sales:
+        if key_src in implied_sales and implied_sales[key_src] is not None:
             dv = Decimal(str(implied_sales[key_src]))
-            put(fact_key, fmt_usd(dv), f"Secondary EV/Sales implied {key_src}", dv)
+            put(fact_key, fmt_usd(dv), f"Secondary EV/Sales {key_src}", dv)
 
     if "ev_mid" in val and "ev_mid" in implied_sales:
         ev_mid_d = Decimal(str(val["ev_mid"]))
         s_mid_d = Decimal(str(implied_sales["ev_mid"]))
         if ev_mid_d > 0:
             delta_pct = ((s_mid_d - ev_mid_d) / ev_mid_d) * Decimal(100)
-            put("ev_sales_vs_ebitda_mid_pct", fmt_pct(delta_pct), "Percent difference between EV/Sales midpoint and EV/EBITDA midpoint", delta_pct)
+            put("ev_sales_vs_ebitda_mid_pct", fmt_pct(delta_pct), "Percent difference between median-based EV/Sales and EV/EBITDA estimates", delta_pct)
 
     multiples = val.get("multiples_used") or {}
     sales_multiples = val.get("sales_multiples_used") or {}
@@ -317,14 +330,14 @@ def build_deterministic_takeaways(fact_pack: LockedFactPack) -> str:
             f"- **Implied Valuation Positioning:** Based on {f.get('valid_peer_count', 'N/A')} verified "
             f"{f.get('target_industry', '')} comparables ({f.get('ev_ebitda_p25', 'N/A')}–{f.get('ev_ebitda_p75', 'N/A')} "
             f"EV/EBITDA, median {f.get('ev_ebitda_median', 'N/A')}), {f.get('target_company_name', 'Target Company')}'s "
-            f"{f.get('target_period_label', 'FY')} normalized EBITDA of {f.get('target_normalized_ebitda', 'N/A')} supports an "
-            f"indicative Enterprise Value of {f['implied_ev_low']} to {f['implied_ev_high']} (midpoint {f['implied_ev_mid']})."
+            f"{f.get('target_period_label', 'FY')} normalized EBITDA of {f.get('target_normalized_ebitda', 'N/A')} supports a "
+            f"P25–P75 EV range of {f['implied_ev_low']} to {f['implied_ev_high']} with a median-based EV of {f['implied_ev_mid']}."
         )
 
     if "implied_equity_mid" in f and "target_net_debt" in f:
         bullets.append(
-            f"- **Equity Bridge:** Adjusting for {f['target_net_debt']} of Net Debt yields an implied Equity Value "
-            f"midpoint of {f['implied_equity_mid']} (range {f.get('implied_equity_low', 'N/A')}–{f.get('implied_equity_high', 'N/A')})."
+            f"- **Equity Bridge:** Adjusting for {f['target_net_debt']} of Net Debt yields a median-based Equity Value "
+            f"of {f['implied_equity_mid']} (P25–P75 range {f.get('implied_equity_low', 'N/A')}–{f.get('implied_equity_high', 'N/A')})."
         )
 
     if "target_ebitda_margin_pct" in f and "peer_median_ebitda_margin_pct" in f:
@@ -336,14 +349,14 @@ def build_deterministic_takeaways(fact_pack: LockedFactPack) -> str:
 
     if "ev_sales_implied_ev_mid" in f:
         bullets.append(
-            f"- **Secondary EV/Sales Cross-Check:** Implies {f['ev_sales_implied_ev_mid']} at peer median EV/Sales "
+            f"- **Secondary EV/Sales Cross-Check:** Median-based EV/Sales implies {f['ev_sales_implied_ev_mid']} at peer median EV/Sales "
             f"({f.get('ev_sales_median', 'N/A')}), representing a {f.get('ev_sales_vs_ebitda_mid_pct', 'N/A')} variance "
-            f"relative to the primary EV/EBITDA midpoint."
+            f"relative to the primary median-based EV/EBITDA estimate."
         )
 
     if "lmm_size_ratio_pct" in f:
         bullets.append(
-            f"- **Scale & Risk Considerations:** Target midpoint EV represents {f['lmm_size_ratio_pct']} of the smallest "
+            f"- **Scale & Risk Considerations:** Target median-based EV represents {f['lmm_size_ratio_pct']} of the smallest "
             f"public peer ({f.get('smallest_peer_ev', 'N/A')}); private-company size and liquidity dispersion should be "
             f"weighed when interpreting public multiples."
         )

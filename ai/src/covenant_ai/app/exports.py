@@ -96,23 +96,32 @@ def render_xlsx_bytes(packet: dict[str, Any]) -> bytes:
         ("Run ID", packet.get("run_id"), "analysis_runs.id", True),
         ("Thread ID", packet.get("thread_id"), "analysis_runs.thread_id", True),
         ("Method Version", packet.get("method_version"), "frozen_method", True),
+        ("Valuation As-Of Date", val.get("valuation_as_of_date"), "data_comparability", True),
         ("Report Digest (SHA-256)", packet.get("digest"), "canonical_review_packet_sha256", True),
         ("Release Status", packet.get("review_status") or packet.get("release_status"), "report_approvals", True),
         ("Audit Verdict", packet.get("audit_verdict"), "self_audit_gate", True),
         ("Company Name", prof.get("company_name"), "company_profiles", True),
         ("Industry", prof.get("industry"), "company_profiles", True),
         ("Period Basis", val.get("ebitda_period") or prof.get("ebitda_period"), "period_parity", True),
+        ("Target Reported EBITDA", (prof.get("adjustment_schedule") or {}).get("reported_ebitda") if prof.get("adjustment_schedule") else prof.get("reported_ebitda") or prof.get("ebitda"), "ebitda_normalization", False),
         ("Target Normalized EBITDA", prof.get("ebitda"), ",".join(ev_lineage.get("target_snapshot_ids") or []), False),
         ("Target Revenue", prof.get("revenue"), "company_profiles.revenue", False),
         ("Target Total Debt", prof.get("total_debt"), ",".join(eq_lineage.get("inputs") or []), False),
         ("Target Cash", prof.get("cash"), ",".join(eq_lineage.get("inputs") or []), False),
-        ("Implied EV Low", val.get("ev_low"), peer_snap_summary, False),
-        ("Implied EV Midpoint", val.get("ev_mid"), peer_snap_summary, False),
-        ("Implied EV High", val.get("ev_high"), peer_snap_summary, False),
-        ("Implied Equity Low", val.get("equity_low"), eq_lineage.get("formula") or "", False),
-        ("Implied Equity Midpoint", val.get("equity_mid"), eq_lineage.get("formula") or "", False),
-        ("Implied Equity High", val.get("equity_high"), eq_lineage.get("formula") or "", False),
+        ("Implied EV Low (P25)", val.get("ev_low"), peer_snap_summary, False),
+        ("Median-Based EV", val.get("ev_mid"), peer_snap_summary, False),
+        ("Implied EV High (P75)", val.get("ev_high"), peer_snap_summary, False),
+        ("EV Arithmetic Midpoint ((Low+High)/2)", val.get("ev_arithmetic_midpoint") if val.get("ev_arithmetic_midpoint") is not None else ((Decimal(str(val["ev_low"])) + Decimal(str(val["ev_high"]))) / Decimal(2) if val.get("ev_low") is not None and val.get("ev_high") is not None else None), "arithmetic_range_midpoint", False),
+        ("Implied Equity Low (P25)", val.get("equity_low"), eq_lineage.get("formula") or "", False),
+        ("Median-Based Equity", val.get("equity_mid"), eq_lineage.get("formula") or "", False),
+        ("Implied Equity High (P75)", val.get("equity_high"), eq_lineage.get("formula") or "", False),
+        ("Equity Arithmetic Midpoint ((Low+High)/2)", val.get("equity_arithmetic_midpoint") if val.get("equity_arithmetic_midpoint") is not None else ((Decimal(str(val["equity_low"])) + Decimal(str(val["equity_high"]))) / Decimal(2) if val.get("equity_low") is not None and val.get("equity_high") is not None else None), "arithmetic_range_midpoint", False),
     ]
+    sens_excl = (val.get("sensitivity") or {}).get("excluding_statistical_outliers") or {}
+    if sens_excl.get("computable"):
+        rows_meta.append(
+            ("Sensitivity Median-Based EV (Excl. Tukey Outliers)", sens_excl.get("ev_mid"), ",".join(sens_excl.get("included_tickers") or []), False)
+        )
     for label, raw_val, ref, is_text in rows_meta:
         r_idx = ws_res.max_row + 1
         _assign_safe_text(ws_res.cell(row=r_idx, column=1), label)
@@ -125,30 +134,42 @@ def render_xlsx_bytes(packet: dict[str, Any]) -> bytes:
 
     # Sheet 2: Comparable Companies
     ws_comps = wb.create_sheet("Comparable Companies")
-    ws_comps.append(["Ticker", "Status", "EV/EBITDA", "EV/Sales", "Snapshot IDs", "Flags / Exclusion Reason"])
+    ws_comps.append(["Ticker", "Status", "EV/EBITDA", "EV/Sales", "Statistical Outlier Flag", "Quartile / Accounting Notes", "Snapshot IDs", "Exclusion Reason"])
     for cell in ws_comps[1]:
         cell.font = header_font
 
     multiples = dict(val.get("multiples_used") or {})
     sales_multiples = dict(val.get("sales_multiples_used") or {})
     outlier_flags = dict(val.get("outlier_flags") or {})
+    stat_outliers = val.get("statistical_outlier_flags")
+    quartile_flags = val.get("quartile_flags")
+    if stat_outliers is None:
+        stat_outliers = {t: m for t, m in outlier_flags.items() if "IQR fence" in str(m)}
+    if quartile_flags is None:
+        quartile_flags = {
+            t: "; ".join(p for p in str(m).split("; ") if "IQR fence" not in p)
+            for t, m in outlier_flags.items()
+        }
+        quartile_flags = {t: m for t, m in quartile_flags.items() if m}
     peer_flags = dict(val.get("peer_flags") or {})
     failed_peers = dict(packet.get("failed_peers") or {})
     peer_snaps = dict(ev_lineage.get("peer_snapshot_ids") or {})
 
     for ticker, mult in multiples.items():
         r_idx = ws_comps.max_row + 1
-        flags = []
-        if outlier_flags.get(ticker):
-            flags.append(str(outlier_flags[ticker]))
+        extra_notes = []
+        if quartile_flags.get(ticker):
+            extra_notes.append(str(quartile_flags[ticker]))
         for v in (peer_flags.get(ticker) or {}).values():
-            flags.append(str(v))
+            extra_notes.append(str(v))
         _assign_safe_text(ws_comps.cell(row=r_idx, column=1), ticker)
         _assign_safe_text(ws_comps.cell(row=r_idx, column=2), "included")
         _assign_decimal_or_missing(ws_comps.cell(row=r_idx, column=3), mult)
         _assign_decimal_or_missing(ws_comps.cell(row=r_idx, column=4), sales_multiples.get(ticker))
-        _assign_safe_text(ws_comps.cell(row=r_idx, column=5), ",".join(peer_snaps.get(ticker) or []))
-        _assign_safe_text(ws_comps.cell(row=r_idx, column=6), "; ".join(flags) if flags else "")
+        _assign_safe_text(ws_comps.cell(row=r_idx, column=5), str(stat_outliers.get(ticker) or ""))
+        _assign_safe_text(ws_comps.cell(row=r_idx, column=6), "; ".join(extra_notes) if extra_notes else "")
+        _assign_safe_text(ws_comps.cell(row=r_idx, column=7), ",".join(peer_snaps.get(ticker) or []))
+        _assign_safe_text(ws_comps.cell(row=r_idx, column=8), "")
 
     for ticker, reason in failed_peers.items():
         r_idx = ws_comps.max_row + 1
@@ -157,7 +178,9 @@ def render_xlsx_bytes(packet: dict[str, Any]) -> bytes:
         ws_comps.cell(row=r_idx, column=3).value = None
         ws_comps.cell(row=r_idx, column=4).value = None
         _assign_safe_text(ws_comps.cell(row=r_idx, column=5), "")
-        _assign_safe_text(ws_comps.cell(row=r_idx, column=6), reason)
+        _assign_safe_text(ws_comps.cell(row=r_idx, column=6), "")
+        _assign_safe_text(ws_comps.cell(row=r_idx, column=7), "")
+        _assign_safe_text(ws_comps.cell(row=r_idx, column=8), reason)
 
     # Sheet 3: Sources
     ws_src = wb.create_sheet("Sources")

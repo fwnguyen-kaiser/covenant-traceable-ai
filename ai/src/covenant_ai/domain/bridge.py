@@ -1,4 +1,6 @@
+from datetime import date
 from decimal import Decimal
+import re
 from .errors import MissingFieldError, PeriodMismatchError
 from .evidence import (
     EvidenceStatus,
@@ -134,8 +136,14 @@ def build_peer_financials(
     )
     em_inc_dp = em_inc_res.datapoint if (em_inc_res.datapoint and em_inc_res.datapoint.period_end == peer_period_end) else None
     em_bs_dp = em_bs_res.datapoint if (em_bs_res.datapoint and em_bs_res.datapoint.period_end == peer_period_end) else None
-    inc_src_ref = got["income_continuing_ops"].source_ref if got["income_continuing_ops"] else ""
+    inc_dp = got["income_continuing_ops"]
+    inc_src_ref = inc_dp.source_ref if inc_dp else ""
     em_pre_excluded = "BeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments" in inc_src_ref
+    filing_dt: date | None = inc_dp.filing_date if inc_dp is not None else None
+    if filing_dt is None and inc_src_ref:
+        m_filed = re.search(r"\bfiled:(\d{4}-\d{2}-\d{2})\b", inc_src_ref)
+        if m_filed:
+            filing_dt = date.fromisoformat(m_filed.group(1))
 
     peer = PeerFinancials(
         ticker=ticker,
@@ -145,6 +153,7 @@ def build_peer_financials(
         ebitda=ebitda,
         ebitda_period=period,
         period_end=peer_period_end,
+        filing_date=filing_dt,
         market_cap_date=got["market_cap"].period_end,
         market_cap_source_ref=got["market_cap"].source_ref,
         preferred_equity=val("preferred_equity"),

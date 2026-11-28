@@ -1,0 +1,44 @@
+{
+  "case_id": "northline_flow",
+  "description": "FY industrial flow company with EBITDA adjustments, LMM spread, and missing cash (EV-only).",
+  "raw_input": "Value Northline Flow Technologies, Inc., a US designer of municipal & industrial filtration and fluid-handling assemblies. In FY2025 ending 2025-12-31, Revenue was $42.5M USD and Reported EBITDA was $5.95M USD, with $350,000 USD excess owner compensation over market replacement and $150,000 USD related-party warehouse rent adjustment. Total debt is $9.2M USD; cash balance is unknown.",
+  "expected_industry": "industrial_machinery",
+  "expected_period": "FY",
+  "expected_normalized_ebitda": "6450000",
+  "expect_clarify": false,
+  "expect_risk_codes": ["lmm_size_spread", "equity_inputs_missing"],
+  "scripted_intake": {
+    "company_name": "Northline Flow Technologies, Inc.",
+    "business_description": "US designer of municipal and industrial filtration and fluid-handling assemblies.",
+    "industry": "industrial_machinery",
+    "customer_type": "b2b",
+    "geography": "US",
+    "revenue_usd": "42500000",
+    "reported_ebitda_usd": "5950000",
+    "ebitda_period": "FY",
+    "target_fiscal_year": 2025,
+    "period_end_date": "2025-12-31",
+    "total_debt_usd": "9200000",
+    "adjustments": [
+      {
+        "category": "owner_compensation",
+        "description": "Excess owner compensation over market replacement",
+        "amount_usd": "350000",
+        "evidence_quote": "$350,000 USD excess owner compensation over market replacement",
+        "confidence": 0.95
+      },
+      {
+        "category": "related_party_rent",
+        "description": "Related-party warehouse rent adjustment",
+        "amount_usd": "150000",
+        "evidence_quote": "$150,000 USD related-party warehouse rent adjustment",
+        "confidence": 0.92
+      }
+    ],
+    "field_inferences": [
+      {"field_name": "industry", "value": "industrial_machinery", "evidence_quote": "industrial filtration and fluid-handling assemblies", "confidence": 0.9},
+      {"field_name": "ebitda_period", "value": "FY", "evidence_quote": "FY2025 ending 2025-12-31", "confidence": 0.98}
+    ]
+  },
+  "peer_tickers": ["GGG", "ITW", "XYL", "FLS", "NDSN"]
+}

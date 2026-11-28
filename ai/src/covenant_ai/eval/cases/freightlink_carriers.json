@@ -1,0 +1,47 @@
+{
+  "case_id": "freightlink_carriers",
+  "description": "Logistics operator initially quoted in EUR requiring USD clarify loop before completing FY valuation.",
+  "raw_input": "Value FreightLink Dedicated Carriers Inc., a US dedicated cold-chain LTL trucking fleet. For FY2025 ending 2025-12-31, revenue was 38M EUR and EBITDA was 5M EUR.",
+  "clarify_reply": "In USD at closing rate for FY2025 ending 2025-12-31: revenue is $41.0M USD, reported EBITDA is $5.4M USD, total debt is $10.0M USD, and cash is $1.5M USD.",
+  "expected_industry": "logistics_freight",
+  "expected_period": "FY",
+  "expected_normalized_ebitda": "5400000",
+  "expect_clarify": true,
+  "expect_risk_codes": ["lmm_size_spread"],
+  "scripted_intake": [
+    {
+      "company_name": "FreightLink Dedicated Carriers Inc.",
+      "business_description": "US dedicated cold-chain LTL trucking fleet.",
+      "industry": "logistics_freight",
+      "customer_type": "b2b",
+      "geography": "US",
+      "ebitda_period": "FY",
+      "target_fiscal_year": 2025,
+      "period_end_date": "2025-12-31",
+      "non_usd_currency_detected": "EUR",
+      "field_inferences": [
+        {"field_name": "industry", "value": "logistics_freight", "evidence_quote": "dedicated cold-chain LTL trucking fleet", "confidence": 0.92},
+        {"field_name": "ebitda_period", "value": "FY", "evidence_quote": "FY2025 ending 2025-12-31", "confidence": 0.98}
+      ]
+    },
+    {
+      "company_name": "FreightLink Dedicated Carriers Inc.",
+      "business_description": "US dedicated cold-chain LTL trucking fleet.",
+      "industry": "logistics_freight",
+      "customer_type": "b2b",
+      "geography": "US",
+      "revenue_usd": "41000000",
+      "reported_ebitda_usd": "5400000",
+      "total_debt_usd": "10000000",
+      "cash_usd": "1500000",
+      "ebitda_period": "FY",
+      "target_fiscal_year": 2025,
+      "period_end_date": "2025-12-31",
+      "field_inferences": [
+        {"field_name": "industry", "value": "logistics_freight", "evidence_quote": "dedicated cold-chain LTL trucking fleet", "confidence": 0.92},
+        {"field_name": "ebitda_period", "value": "FY", "evidence_quote": "FY2025 ending 2025-12-31", "confidence": 0.98}
+      ]
+    }
+  ],
+  "peer_tickers": ["ODFL", "XPO", "SAIA", "KNX", "WERN"]
+}

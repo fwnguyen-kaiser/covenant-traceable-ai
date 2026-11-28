@@ -1,0 +1,31 @@
+{
+  "case_id": "aegis_soc",
+  "description": "IT services managed SOC provider (must route to it_services, not software) with customer concentration >= 25%.",
+  "raw_input": "Value AegisCyber Defense LLC, a US managed SOC security monitoring and FedRAMP IT consulting firm serving B2B and gov clients. For FY2025 ending 2025-12-31, revenue was $34M USD and Reported EBITDA was $5.1M USD. Total debt is $4M USD and cash is $6M USD. Largest customer concentration is 32% of revenue.",
+  "expected_industry": "it_services",
+  "expected_period": "FY",
+  "expected_normalized_ebitda": "5100000",
+  "expect_clarify": false,
+  "expect_risk_codes": ["customer_concentration", "lmm_size_spread"],
+  "scripted_intake": {
+    "company_name": "AegisCyber Defense LLC",
+    "business_description": "US managed SOC security monitoring and FedRAMP IT consulting firm.",
+    "industry": "it_services",
+    "customer_type": "mixed",
+    "geography": "US",
+    "revenue_usd": "34000000",
+    "reported_ebitda_usd": "5100000",
+    "ebitda_period": "FY",
+    "target_fiscal_year": 2025,
+    "period_end_date": "2025-12-31",
+    "total_debt_usd": "4000000",
+    "cash_usd": "6000000",
+    "customer_concentration_pct": "32",
+    "field_inferences": [
+      {"field_name": "industry", "value": "it_services", "evidence_quote": "managed SOC security monitoring and FedRAMP IT consulting", "confidence": 0.94},
+      {"field_name": "customer_type", "value": "mixed", "evidence_quote": "B2B and gov clients", "confidence": 0.9},
+      {"field_name": "ebitda_period", "value": "FY", "evidence_quote": "FY2025 ending 2025-12-31", "confidence": 0.98}
+    ]
+  },
+  "peer_tickers": ["CTSH", "EPAM", "DXC", "CACI", "SAIC"]
+}
